@@ -77,6 +77,13 @@ RAMP = np.array([
     [ 80,180, 90],[150,200, 60],[230,205, 50],[235,150, 40],[215,60,40],[190,40,120]
 ], float)   # Met rain colours, light -> heavy
 
+# reject a "nearest RAMP colour" match further than this (RGB units) away --
+# adjacent RAMP entries in the light-blue range sit only ~13-15 apart, so
+# this needs to stay well under that or it'll blur distinct light-rain
+# levels together. Tune against a real frame if the background still gets
+# misclassified as rain, or if faint real rain starts vanishing instead.
+MAX_RAMP_DIST = 35
+
 GREY = {i+1: v for i, v in enumerate(
     [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
 
@@ -136,8 +143,15 @@ def classify(r, g, b):
     for k, c in enumerate(RAMP):                       # 16 passes, tiny memory
         dd = ((px - c) ** 2).sum(1)
         m = dd < best; best[m] = dd[m]; idx[m] = k
+    # clearing the sat/mx gate isn't enough on its own -- reject a match that
+    # isn't actually close to any real RAMP colour (e.g. a desaturated
+    # background that just barely clears sat>0.30), rather than force-fitting
+    # it to whichever RAMP entry happens to be nearest.
+    matched = best <= MAX_RAMP_DIST ** 2
     lvl = np.zeros(r.shape, int)
-    lvl[rain] = idx + 1
+    sub = lvl[rain]
+    sub[matched] = idx[matched] + 1
+    lvl[rain] = sub
 
     from PIL import ImageFilter
     for _ in range(5):
