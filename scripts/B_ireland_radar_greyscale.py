@@ -28,9 +28,10 @@ NOTE
     Y0/Y1 there and this file picks up the change automatically.
 """
 
-import os, sys, io, json, math
+import os, sys, io, json, math, datetime as dt
+from zoneinfo import ZoneInfo
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 import A_met_radar_probe as radar_probe
 
@@ -72,6 +73,16 @@ RAMP = np.array([
 
 GREY = {i+1: v for i, v in enumerate(
     [210,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
+
+RANGE_GREY = 220   # lightest tier: shows radar coverage extent, lighter than any rain level
+
+# The muted olive-green Met Eireann draws over the radar's coverage circle,
+# distinguished from real rain by low saturation (RAMP rain colours are all
+# vivid). Tune these against a real saved frame if the circle doesn't show.
+RANGE_G_MIN_OVER_R = 10
+RANGE_G_MIN_OVER_B = 10
+RANGE_G_MIN         = 60
+RANGE_G_MAX         = 200
 
 RadarImageSubfolder = "0_RadarPNG"
 GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
@@ -128,6 +139,19 @@ def classify(r, g, b):
     return lvl
 
 
+def in_range_mask(r, g, b, lvl):
+    """True where a pixel is Met Eireann's dry-but-in-range green -- checked only
+    among pixels classify() already ruled out as rain, so a loose colour match
+    here can never steal a real rain pixel."""
+    g_dominant = (g > r + RANGE_G_MIN_OVER_R) & (g > b + RANGE_G_MIN_OVER_B)
+    bright_enough = (g > RANGE_G_MIN) & (g < RANGE_G_MAX)
+    return (lvl == 0) & g_dominant & bright_enough
+
+
+def _load_font(size):
+    return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+
+
 def fill_black(A, thresh=95, max_iter=16):
     """Replace any near-black pixels (tile-stitch seams, if any) with the average
     of the nearest non-black pixels, so rain reads continuous across them.
@@ -179,7 +203,7 @@ def build_window():
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
 
 
-def render(src, rings_County, rings_Coast):
+def render(src, rings_County, rings_Coast, frame_time=None):
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -199,7 +223,9 @@ def render(src, rings_County, rings_Coast):
     LON, LAT = np.degrees(XX), inv_mercY(YY)
     PX = np.clip((S * np.radians(LON) + BX).astype(int), 0, IMG_W - 1)
     PY = np.clip((BY - S * mercY(LAT)).astype(int), 0, IMG_H - 1)
-    lvl = classify(A[PY, PX, 0], A[PY, PX, 1], A[PY, PX, 2])
+    Rc, Gc, Bc = A[PY, PX, 0], A[PY, PX, 1], A[PY, PX, 2]
+    lvl = classify(Rc, Gc, Bc)
+    rangem = in_range_mask(Rc, Gc, Bc, lvl)
 
 
 
@@ -212,6 +238,7 @@ def render(src, rings_County, rings_Coast):
 
     out = np.full((H, W), SEA, np.uint8)
     out[landm] = LAND
+    out[rangem] = RANGE_GREY          # radar coverage extent, under any rain
     for k, gv in GREY.items():
         out[lvl == k] = gv
 
@@ -229,6 +256,13 @@ def render(src, rings_County, rings_Coast):
     rr = 3
     d.ellipse([mx-rr-1, my-rr-1, mx+rr+1, my+rr+1], fill=250)
     d.ellipse([mx-rr, my-rr, mx+rr, my+rr], outline=DOT, width=2)
+
+    if frame_time is not None:
+        label_font = _load_font(18)
+        time_font = _load_font(30)
+        d.text((16, 12), "Met Éireann", fill=COAST_LINE, font=label_font)
+        d.text((16, 34), frame_time.strftime("%H:%M, %d/%m/%Y"), fill=COAST_LINE, font=time_font)
+
     return img
 
 
@@ -259,7 +293,16 @@ def main():
     for imgpath in png_files:
         print(f"{imgpath}")
         src = Image.open(f"{RadarImageSubfolder}/{imgpath}").convert("RGB") if imgpath else fetch_latest()
-        img = render(src, load_counties(), load_coastline())
+        stamp = os.path.splitext(imgpath)[0] if imgpath else None
+        # the "src" timestamp in the filename is UTC (confirmed against the
+        # manifest); convert to Irish local time for display.
+        frame_time = (
+            dt.datetime.strptime(stamp, "%Y%m%d%H%M")
+            .replace(tzinfo=dt.timezone.utc)
+            .astimezone(ZoneInfo("Europe/Dublin"))
+            if stamp else None
+        )
+        img = render(src, load_counties(), load_coastline(), frame_time)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
