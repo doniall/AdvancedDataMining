@@ -2,55 +2,70 @@
 """
 met_radar_probe.py
 
-Confirms Met Eireann's rainfall-radar image endpoint, finds the latest live
-frame, saves it, and reports its dimensions so we can georeference it for the
-LED map.
+Fetches Met Eireann rainfall-radar frames and saves them locally so
+ireland_radar_greyscale.py can process them.
 
-Verified endpoint pattern (from a working community scraper):
-    https://www.met.ie/images/radar/web17_radar15_YYYYMMDDHHMM.png
-Timestamps sit on the quarter hour and are treated as UTC here.
+Real endpoint (found via browser DevTools -> Network tab, not guessed):
+    manifest: https://gdal.met.ie/api/maps/radar
+        -> JSON list of available frames, each with a "src" timestamp
+           (YYYYMMDDHHMM) and a "modifiedTime" cache token.
+    tiles:    https://gdal.met.ie/api/maps/radar/{src}/{x}/{y}/{z}/{modifiedTime}
+        -> one 256x256 PNG tile. Ireland is covered by a fixed 4x3 grid
+           at zoom 7 (x: 59-62, y: 40-42), stitched together here into
+           one 1024x768 image per frame.
 
-This also probes two speculative 5-minute filename guesses and simply reports
-which, if any, respond. It does not assume they exist.
+The old https://www.met.ie/images/radar/web17_radar15_*.png endpoint is a
+different, coarser product -- it visibly smooths away small, intense rain
+cores that this tile endpoint preserves.
 
 Run:   python3 met_radar_probe.py
-Needs: Python 3.8+ standard library. Pillow is optional (for image size):
-       pip install pillow
+Needs: pip install pillow certifi
 """
 
-import datetime as dt
 import io
+import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 
-BASE = "https://www.met.ie/images/radar"
+from PIL import Image
 
-# (filename_prefix, cadence_minutes). The 15-min entry is verified.
-# The others are guesses at a possible 5-min set; the script only reports them.
-PATTERNS = [
-    ("web17_radar15_", 15),   # verified
-    #("web17_radar05_", 5),     # speculative
-    #("web17_radar_", 5),      # speculative
-]
+MANIFEST_URL = "https://gdal.met.ie/api/maps/radar"
+TILE_URL = "https://gdal.met.ie/api/maps/radar/{src}/{x}/{y}/{z}/{token}"
+TILE_ZOOM = 7
+TILE_X0, TILE_X1 = 59, 62   # inclusive
+TILE_Y0, TILE_Y1 = 40, 42   # inclusive
+TILE_SIZE = 256
 
-MAX_STEPS_BACK = 12  # intervals to walk back while hunting for a live frame
 TIMEOUT = 15
 RadarImageSubfolder = "0_RadarPNG"
+GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
 
 
-def utc_floor(now, minutes):
-    """Round a datetime down to the nearest `minutes` boundary."""
-    discard = now.minute % minutes
-    return now.replace(second=0, microsecond=0) - dt.timedelta(minutes=discard)
+def ListFilesInDirectory(Address):
+    #list all files in a location
+    from os import walk
+    results = next(walk(Address), (None, None, []))[2]  # [] if no file
+    return results
 
 
-def try_url(url):
+def _ssl_context():
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass  # fall back to the system store
+    return ctx
+
+
+def fetch_url(url):
     req = urllib.request.Request(
-        url, method="GET", headers={"User-Agent": "radar-probe/1.0"}
+        url, headers={"User-Agent": "radar-probe/1.0", "Referer": "https://www.met.ie/"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=_ssl_context()) as r:
             return getattr(r, "status", r.getcode()), r.read()
     except urllib.error.HTTPError as e:
         return e.code, None
@@ -59,66 +74,64 @@ def try_url(url):
         return None, None
 
 
-def probe():
-    now = dt.datetime.now(dt.timezone.utc)
-    print(f"UTC now: {now:%Y-%m-%d %H:%M}\n")
-    found = []
-    for prefix, step in PATTERNS:
-        print(f"Testing pattern '{prefix}*' ({step}-min steps):")
-        t = utc_floor(now, step)
-        hit = None
-        for _ in range(MAX_STEPS_BACK):
-            stamp = t.strftime("%Y%m%d%H%M")
-            url = f"{BASE}/{prefix}{stamp}.png"
-            status, data = try_url(url)
-            print(f"  {status}  {url}")
-            if status == 200 and data:
-                hit = (url, data)
-                break
-            t -= dt.timedelta(minutes=step)
-        if hit:
-            found.append((prefix, step, *hit))
-        print()
-    return found
+def fetch_frame_list():
+    """The manifest of currently-available frames: each has 'src' (timestamp)
+    and 'modifiedTime' (cache token), both required to fetch its tiles."""
+    status, data = fetch_url(MANIFEST_URL)
+    if status != 200 or not data:
+        print(f"could not load frame manifest (status {status})")
+        return []
+    return json.loads(data)
 
 
-def report(prefix, step, url, data):
+def fetch_frame(src, token):
+    """Download and stitch one frame's tile grid into a single RGB image."""
+    mosaic = Image.new("RGB", (TILE_SIZE * (TILE_X1 - TILE_X0 + 1),
+                                TILE_SIZE * (TILE_Y1 - TILE_Y0 + 1)))
+    for ty in range(TILE_Y0, TILE_Y1 + 1):
+        for tx in range(TILE_X0, TILE_X1 + 1):
+            url = TILE_URL.format(src=src, x=tx, y=ty, z=TILE_ZOOM, token=token)
+            status, data = fetch_url(url)
+            if status != 200 or not data:
+                print(f"    missing tile {tx},{ty} for {src} (status {status})")
+                return None
+            tile = Image.open(io.BytesIO(data)).convert("RGB")
+            mosaic.paste(tile, ((tx - TILE_X0) * TILE_SIZE, (ty - TILE_Y0) * TILE_SIZE))
+    return mosaic
+
+
+def report(filename, frame):
     os.makedirs(RadarImageSubfolder, exist_ok=True)
-    fname = url.rsplit("/", 1)[-1]
-    path = os.path.join(RadarImageSubfolder, fname)
-    with open(path, "wb") as f:
-        f.write(data)
-    print(f"LIVE  {url}")
-    print(f"      saved as {path}  ({len(data)} bytes, ~{step}-min cadence)")
-    try:
-        from PIL import Image
-
-        im = Image.open(io.BytesIO(data))
-        print(f"      image: {im.size[0]} x {im.size[1]} px, mode {im.mode}")
-    except ImportError:
-        print("      (install Pillow to read dimensions: pip install pillow)")
-    except Exception as e:
-        print(f"      (could not read image: {e})")
+    img = fetch_frame(frame["src"], frame["modifiedTime"])
+    if img is None:
+        print(f"FAILED  {frame.get('toolTipDate', frame['src'])}")
+        return
+    path = os.path.join(RadarImageSubfolder, filename)
+    img.save(path)
+    print(f"LIVE  {frame.get('toolTipDate', frame['src'])}")
+    print(f"      saved as {filename}  {img.size[0]}x{img.size[1]} px, mode {img.mode}")
     print()
 
 
 def main():
-    results = probe()
-    if not results:
-        print(
-            "No live frame on any pattern. The endpoint may have changed.\n"
-            "Capture the real URL from met.ie in browser DevTools: open the\n"
-            "radar map, F12 -> Network tab, filter 'radar' or 'png', and watch\n"
-            "the request that loads as the map refreshes."
-        )
+    frames = fetch_frame_list()
+    if not frames:
+        print("No frames in manifest. The endpoint may have changed.")
         return
-    print("=" * 60)
-    for r in results:
-        report(*r)
-    print(
-        "Next: send me the working URL, the image dimensions, and (if you can)\n"
-        "upload the saved PNG. I'll georeference it and write the ESP32 firmware."
-    )
+
+    #list all images already loaded
+    LoadedRadarImages = ListFilesInDirectory(RadarImageSubfolder)
+
+    #list all those missing, keyed by the filename we save them as
+    wanted = {f"{fr['src']}.png": fr for fr in frames}
+    missing = sorted(set(wanted) - set(LoadedRadarImages))
+
+    if not missing:
+        print("No new frames to fetch.")
+        return
+
+    for filename in missing:
+        report(filename, wanted[filename])
 
 
 if __name__ == "__main__":
