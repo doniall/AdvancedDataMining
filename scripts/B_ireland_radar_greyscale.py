@@ -77,12 +77,15 @@ RAMP = np.array([
     [ 80,180, 90],[150,200, 60],[230,205, 50],[235,150, 40],[215,60,40],[190,40,120]
 ], float)   # Met rain colours, light -> heavy
 
-# reject a "nearest RAMP colour" match further than this (RGB units) away --
-# adjacent RAMP entries in the light-blue range sit only ~13-15 apart, so
-# this needs to stay well under that or it'll blur distinct light-rain
-# levels together. Tune against a real frame if the background still gets
-# misclassified as rain, or if faint real rain starts vanishing instead.
-MAX_RAMP_DIST = 35
+# Met Eireann's dry-but-in-range olive, sampled directly from a saved frame
+# (see conversation history). Its nearest RAMP colour is 70 RGB units away
+# (vivid green, [80,180,90]), so a tolerance well under that rejects only
+# this specific background hue without touching real rain colours, however
+# far they've drifted from their exact RAMP value due to blending/anti-
+# aliasing -- unlike a blanket "must be close to some RAMP entry" rule,
+# which was rejecting genuine yellow/green rain too.
+BACKGROUND_RGB       = np.array([71, 112, 76], float)
+BACKGROUND_TOLERANCE = 30
 
 GREY = {i+1: v for i, v in enumerate(
     [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
@@ -91,14 +94,6 @@ GREY = {i+1: v for i, v in enumerate(
 # coverage extent reads as a faint tint rather than a visible grey. GREY[1]
 # (lightest rain) sits two ladder-steps (~12 each) below it.
 RANGE_GREY = 250
-
-# The muted olive-green Met Eireann draws over the radar's coverage circle,
-# distinguished from real rain by low saturation (RAMP rain colours are all
-# vivid). Tune these against a real saved frame if the circle doesn't show.
-RANGE_G_MIN_OVER_R = 10
-RANGE_G_MIN_OVER_B = 10
-RANGE_G_MIN         = 60
-RANGE_G_MAX         = 200
 
 RadarImageSubfolder = "0_RadarPNG"
 GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
@@ -131,27 +126,30 @@ def load_counties():
     with open(os.path.join(here, "ireland_counties.json")) as f:
         return [np.array(r, float) for r in json.load(f)]
 
+def is_background(r, g, b):
+    """True where a pixel matches Met Eireann's dry-but-in-range olive,
+    within BACKGROUND_TOLERANCE RGB units. The one place this exact colour
+    is defined -- classify() excludes it from rain matching, in_range_mask()
+    uses the same test to positively identify it, so the two can't disagree."""
+    dd = ((r - BACKGROUND_RGB[0]) ** 2 + (g - BACKGROUND_RGB[1]) ** 2
+          + (b - BACKGROUND_RGB[2]) ** 2)
+    return dd < BACKGROUND_TOLERANCE ** 2
+
+
 def classify(r, g, b):
     """0 = no rain; 1..16 = Met intensity (light..heavy), nearest point on RAMP."""
     r, g, b = r.astype(float),g.astype(float),b.astype(float)
     mx = np.maximum(np.maximum(r, g), b)
     mn = np.minimum(np.minimum(r, g), b)
     sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1), 0)
-    rain = (sat > 0.30) & (mx > 70)
+    rain = (sat > 0.30) & (mx > 70) & ~is_background(r, g, b)
     px = np.stack([r, g, b], -1)[rain]                 # rain pixels only
     best = np.full(len(px), 1e18); idx = np.zeros(len(px), int)
     for k, c in enumerate(RAMP):                       # 16 passes, tiny memory
         dd = ((px - c) ** 2).sum(1)
         m = dd < best; best[m] = dd[m]; idx[m] = k
-    # clearing the sat/mx gate isn't enough on its own -- reject a match that
-    # isn't actually close to any real RAMP colour (e.g. a desaturated
-    # background that just barely clears sat>0.30), rather than force-fitting
-    # it to whichever RAMP entry happens to be nearest.
-    matched = best <= MAX_RAMP_DIST ** 2
     lvl = np.zeros(r.shape, int)
-    sub = lvl[rain]
-    sub[matched] = idx[matched] + 1
-    lvl[rain] = sub
+    lvl[rain] = idx + 1
 
     from PIL import ImageFilter
     for _ in range(5):
@@ -166,9 +164,7 @@ def in_range_mask(r, g, b, lvl):
     """True where a pixel is Met Eireann's dry-but-in-range green -- checked only
     among pixels classify() already ruled out as rain, so a loose colour match
     here can never steal a real rain pixel."""
-    g_dominant = (g > r + RANGE_G_MIN_OVER_R) & (g > b + RANGE_G_MIN_OVER_B)
-    bright_enough = (g > RANGE_G_MIN) & (g < RANGE_G_MAX)
-    return (lvl == 0) & g_dominant & bright_enough
+    return (lvl == 0) & is_background(r, g, b)
 
 
 _FONT_CACHE = {}
