@@ -64,7 +64,8 @@ SOUTH_CUTOFF_PX = 55
 IRELAND_BOUNDS = (-10.4782, 51.4457, -5.4308, 55.3864)   # minlon, minlat, maxlon, maxlat
 
 # --- greyscale look (0 = black, 255 = white) ---
-SEA, LAND   = 226, 248
+BACKGROUND  = 255   # no distinction between sea and land -- only coastline/
+                     # county lines, radar extent, and rain levels carry meaning
 COAST_HALO  = 248
 COAST_LINE  = 22
 DOT         = 20
@@ -77,9 +78,12 @@ RAMP = np.array([
 ], float)   # Met rain colours, light -> heavy
 
 GREY = {i+1: v for i, v in enumerate(
-    [210,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
+    [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
 
-RANGE_GREY = 220   # lightest tier: shows radar coverage extent, lighter than any rain level
+# lightest thing in the whole palette -- barely off white, so the radar's
+# coverage extent reads as a faint tint rather than a visible grey. GREY[1]
+# (lightest rain) sits two ladder-steps (~12 each) below it.
+RANGE_GREY = 250
 
 # The muted olive-green Met Eireann draws over the radar's coverage circle,
 # distinguished from real rain by low saturation (RAMP rain colours are all
@@ -284,15 +288,7 @@ def render(src, rings_County, rings_Coast, frame_time=None):
 
 
 
-    # land base via rasterising the coastline polygons
-    land = Image.new("L", (W, H), 0)
-    ldraw = ImageDraw.Draw(land)
-    for ring in rings_Coast:
-        ldraw.polygon([ll2r(lo, la) for lo, la in ring], fill=255)
-    landm = np.asarray(land) > 0
-
-    out = np.full((H, W), SEA, np.uint8)
-    out[landm] = LAND
+    out = np.full((H, W), BACKGROUND, np.uint8)
     out[rangem] = RANGE_GREY          # radar coverage extent, under any rain
     for k, gv in GREY.items():
         out[lvl == k] = gv
