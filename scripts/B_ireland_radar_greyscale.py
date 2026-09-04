@@ -153,8 +153,36 @@ def in_range_mask(r, g, b, lvl):
     return (lvl == 0) & g_dominant & bright_enough
 
 
+_FONT_CACHE = {}
+
+_FONT_CANDIDATES = [
+    "DejaVuSans-Bold.ttf",                                   # found via fontconfig on some Linux setups
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux, explicit path
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",     # macOS
+    "/Library/Fonts/Arial Bold.ttf",                         # macOS (older)
+    "C:\\Windows\\Fonts\\arialbd.ttf",                       # Windows
+]
+
+
 def _load_font(size):
-    return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+    """Try known bold-font locations across platforms; fall back to Pillow's
+    own scalable default font (bundled, always available) if none exist."""
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    font = None
+    for path in _FONT_CANDIDATES:
+        try:
+            font = ImageFont.truetype(path, size)
+            break
+        except OSError:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.load_default(size=size)
+        except TypeError:
+            font = ImageFont.load_default()   # older Pillow: fixed size, no scaling
+    _FONT_CACHE[size] = font
+    return font
 
 
 def fill_black(A, thresh=95, max_iter=16):
