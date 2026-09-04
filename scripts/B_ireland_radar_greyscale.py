@@ -189,11 +189,39 @@ def _load_clutter_baseline():
     return _clutter_baseline
 
 
-def suppress_clutter(lvl, PY, PX):
-    """Zero out a pixel's level if it's at or below its own historical
-    baseline -- real rain that pushes above the usual level still shows."""
-    baseline = _load_clutter_baseline()[PY, PX]
-    return np.where(lvl <= baseline, 0, lvl)
+# radius (source pixels) checked around each clutter pixel for corroborating
+# rain elsewhere -- a real rain system doesn't have a precise hole exactly at
+# a clutter spot, so if enough real rain surrounds it, trust this pixel too
+# even at its usual (otherwise-suppressed) level
+NEARBY_RADIUS_PX = 12
+NEARBY_MIN_FRACTION = 0.05
+
+
+def _box_sum(a, radius):
+    """Sum of `a` over a (2*radius+1) square window centred on each cell,
+    via an integral image -- no scipy dependency."""
+    pad = np.pad(a.astype(np.int32), radius, mode="constant")
+    csum = np.pad(pad.cumsum(0).cumsum(1), ((1, 0), (1, 0)), mode="constant")
+    s = radius * 2 + 1
+    return csum[s:, s:] - csum[:-s, s:] - csum[s:, :-s] + csum[:-s, :-s]
+
+
+def suppress_clutter_source(full_lvl):
+    """Zero out a clutter pixel's level if it's at or below its own historical
+    baseline AND there's no real rain corroborating it nearby. Real rain that
+    either exceeds the usual level, or is backed by rain surrounding the
+    clutter spot, still shows -- operates on the full source-resolution
+    classification so "nearby" means real geography, not output pixels."""
+    baseline = _load_clutter_baseline()
+    clutter = baseline > 0
+
+    real_rain = (full_lvl > 0) & ~clutter   # exclude clutter pixels as their own evidence
+    window_area = (2 * NEARBY_RADIUS_PX + 1) ** 2
+    nearby_rain_frac = _box_sum(real_rain, NEARBY_RADIUS_PX) / window_area
+    corroborated = nearby_rain_frac >= NEARBY_MIN_FRACTION
+
+    suppress = clutter & (full_lvl <= baseline) & ~corroborated
+    return np.where(suppress, 0, full_lvl)
 
 
 _FONT_CACHE = {}
@@ -321,9 +349,10 @@ def render(src, rings_County, rings_Coast, frame_time=None):
     LON, LAT = np.degrees(XX), inv_mercY(YY)
     PX = np.clip((S * np.radians(LON) + BX).astype(int), 0, IMG_W - 1)
     PY = np.clip((BY - S * mercY(LAT)).astype(int), 0, IMG_H - 1)
+    full_lvl = classify(A[:, :, 0], A[:, :, 1], A[:, :, 2])
+    full_lvl = suppress_clutter_source(full_lvl)
+    lvl = full_lvl[PY, PX]
     Rc, Gc, Bc = A[PY, PX, 0], A[PY, PX, 1], A[PY, PX, 2]
-    lvl = classify(Rc, Gc, Bc)
-    lvl = suppress_clutter(lvl, PY, PX)
     rangem = in_range_mask(Rc, Gc, Bc, lvl)
 
 
