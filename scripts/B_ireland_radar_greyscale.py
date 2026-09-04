@@ -200,6 +200,27 @@ def build_window():
         if hw / hh < ac: hw = hh * ac
         else:            hh = hw / ac
         Wwin, Hwin = 2 * hw, 2 * hh
+
+    hw, hh = Wwin / 2, Hwin / 2
+
+    # never request geography past the tile mosaic's own edge -- beyond it
+    # there's no data, and PX/PY clipping would just stretch the edge row/
+    # column across the gap instead of showing anything real.
+    tile_x_min, tile_x_max = (0 - BX) / S, (IMG_W - BX) / S
+    tile_y_min, tile_y_max = (BY - IMG_H) / S, (BY - 0) / S
+    west, east = max(cx - hw, tile_x_min), min(cx + hw, tile_x_max)
+    south, north = max(cy - hh, tile_y_min), min(cy + hh, tile_y_max)
+    cx, hw = (west + east) / 2, (east - west) / 2
+    cy, hh = (south + north) / 2, (north - south) / 2
+
+    # clamping can unbalance the aspect ratio; shrink whichever axis is now
+    # oversized to restore it -- this only ever shrinks, so it can't
+    # re-violate the tile bounds just enforced above
+    ac = W / H
+    if hw / hh > ac: hw = hh * ac
+    else:            hh = hw / ac
+    Wwin, Hwin = 2 * hw, 2 * hh
+
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
 
 
