@@ -18,6 +18,8 @@ REQUIRES
     pip3 install numpy pillow certifi
     Keep ireland_coastline.json and ireland_counties.json in the same folder.
     A_met_radar_probe.py must also be in the same folder (used for fetching).
+    Optional: run D_ship_ais.py first to draw live ship positions from
+    ship_positions.json -- if that file doesn't exist, ships are just skipped.
 
 NOTE
     The projection is exact, not fitted: gdal.met.ie serves standard Web
@@ -98,6 +100,13 @@ RANGE_GREY = 250
 RadarImageSubfolder = "0_RadarPNG"
 GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
 
+# ships are drawn near-black with a light halo so they read clearly whether
+# they sit over pale background or dark (heavy-rain) pixels -- the same
+# halo-then-line trick used for the coastline
+SHIP_MARK = 0
+SHIP_HALO = 255
+SHIP_SIZE = 5   # centre-to-nose length, in output px
+
 
 def mercY(lat):     return np.log(np.tan(np.pi / 4 + np.radians(lat) / 2))
 def inv_mercY(y):   return np.degrees(2 * np.arctan(np.exp(y)) - np.pi / 2)
@@ -125,6 +134,16 @@ def load_counties():
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "ireland_counties.json")) as f:
         return [np.array(r, float) for r in json.load(f)]
+
+SHIP_POSITIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_positions.json")
+
+def load_ships():
+    """Live ship positions saved by D_ship_ais.py -- [] (no markers) if that
+    script hasn't been run yet, so ship display is entirely optional."""
+    if not os.path.exists(SHIP_POSITIONS_PATH):
+        return []
+    with open(SHIP_POSITIONS_PATH) as f:
+        return json.load(f)
 
 def is_background(r, g, b):
     """True where a pixel matches Met Eireann's dry-but-in-range olive,
@@ -256,6 +275,26 @@ def _load_font(size):
     return font
 
 
+def _ship_triangle(x, y, direction_deg, size):
+    """Points of a small triangle centred on (x, y), nose pointing
+    direction_deg clockwise from north/up -- or a plain diamond if no
+    heading/course is known for that ship."""
+    if direction_deg is None:
+        return [(x, y - size), (x + size, y), (x, y + size), (x - size, y)]
+    a = math.radians(direction_deg)
+    fx, fy = math.sin(a), -math.cos(a)   # forward unit vector, 0 deg = up
+    bx, by = -fy, fx                     # perpendicular unit vector
+    nose  = (x + fx * size * 1.6, y + fy * size * 1.6)
+    left  = (x + bx * size - fx * size * 0.6, y + by * size - fy * size * 0.6)
+    right = (x - bx * size - fx * size * 0.6, y - by * size - fy * size * 0.6)
+    return [nose, left, right]
+
+
+def _draw_ship(d, x, y, direction_deg):
+    d.polygon(_ship_triangle(x, y, direction_deg, SHIP_SIZE + 2), fill=SHIP_HALO)
+    d.polygon(_ship_triangle(x, y, direction_deg, SHIP_SIZE), fill=SHIP_MARK)
+
+
 def fill_black(A, thresh=95, max_iter=16):
     """Replace any near-black pixels (tile-stitch seams, if any) with the average
     of the nearest non-black pixels, so rain reads continuous across them.
@@ -329,7 +368,7 @@ def build_window():
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
 
 
-def render(src, rings_County, rings_Coast, frame_time=None):
+def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -372,6 +411,15 @@ def render(src, rings_County, rings_Coast, frame_time=None):
     for ring in rings_Coast:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
 
+    for ship in ships or []:
+        lon, lat = ship.get("lon"), ship.get("lat")
+        if lon is None or lat is None:
+            continue
+        heading, cog = ship.get("heading"), ship.get("cog")
+        direction = heading if heading not in (None, 511) else (
+            cog if cog is not None and cog < 360 else None)
+        _draw_ship(d, *ll2r(lon, lat), direction)
+
     mx, my = ll2r(LOCATION_LON, LOCATION_LAT)
     rr = 3
     d.ellipse([mx-rr-1, my-rr-1, mx+rr+1, my+rr+1], fill=250)
@@ -409,6 +457,7 @@ def main():
     #remove any entries that are not .png files
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
+    ships = load_ships()
     print(f"test")
     for imgpath in png_files:
         print(f"{imgpath}")
@@ -422,7 +471,7 @@ def main():
             .astimezone(ZoneInfo("Europe/Dublin"))
             if stamp else None
         )
-        img = render(src, load_counties(), load_coastline(), frame_time)
+        img = render(src, load_counties(), load_coastline(), frame_time, ships)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
