@@ -167,6 +167,35 @@ def in_range_mask(r, g, b, lvl):
     return (lvl == 0) & is_background(r, g, b)
 
 
+CLUTTER_BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clutter_baseline.npy")
+_clutter_baseline = None
+_warned_no_clutter_baseline = False
+
+
+def _load_clutter_baseline():
+    """Per-source-pixel 'usual rain level', built by C_build_clutter_baseline.py
+    from saved frame history. Cached per process; a bare zeros array (no
+    suppression) if the file hasn't been built yet."""
+    global _clutter_baseline, _warned_no_clutter_baseline
+    if _clutter_baseline is None:
+        if os.path.exists(CLUTTER_BASELINE_PATH):
+            _clutter_baseline = np.load(CLUTTER_BASELINE_PATH)
+        else:
+            _clutter_baseline = np.zeros((IMG_H, IMG_W), np.uint8)
+            if not _warned_no_clutter_baseline:
+                print("note: no clutter_baseline.npy yet -- run C_build_clutter_baseline.py "
+                      "to suppress Met Eireann's permanent radar clutter")
+                _warned_no_clutter_baseline = True
+    return _clutter_baseline
+
+
+def suppress_clutter(lvl, PY, PX):
+    """Zero out a pixel's level if it's at or below its own historical
+    baseline -- real rain that pushes above the usual level still shows."""
+    baseline = _load_clutter_baseline()[PY, PX]
+    return np.where(lvl <= baseline, 0, lvl)
+
+
 _FONT_CACHE = {}
 
 _FONT_CANDIDATES = [
@@ -294,6 +323,7 @@ def render(src, rings_County, rings_Coast, frame_time=None):
     PY = np.clip((BY - S * mercY(LAT)).astype(int), 0, IMG_H - 1)
     Rc, Gc, Bc = A[PY, PX, 0], A[PY, PX, 1], A[PY, PX, 2]
     lvl = classify(Rc, Gc, Bc)
+    lvl = suppress_clutter(lvl, PY, PX)
     rangem = in_range_mask(Rc, Gc, Bc, lvl)
 
 
