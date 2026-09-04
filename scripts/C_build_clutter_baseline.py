@@ -28,6 +28,26 @@ import B_ireland_radar_greyscale as B
 
 NUM_LEVELS = len(B.GREY) + 1  # 0 (no rain) through the highest RAMP level
 
+# a clutter blob's reliable core hits the same level almost every frame, but
+# its fringe is noisier (resampling jitter, intensity falloff at the edge)
+# and can fall just short of majority -- dilating the baseline by this many
+# pixels covers that fuzzy edge instead of leaving a suppressed core with an
+# unsuppressed ring around it
+DILATE_PX = 2
+
+
+def dilate_max(a, iterations):
+    """Grow each cell to the max of its 3x3 neighbourhood, `iterations` times."""
+    out = a.astype(np.uint8)
+    for _ in range(iterations):
+        p = np.pad(out, 1, mode="edge")
+        out = np.maximum.reduce([
+            p[0:-2, 0:-2], p[0:-2, 1:-1], p[0:-2, 2:],
+            p[1:-1, 0:-2], p[1:-1, 1:-1], p[1:-1, 2:],
+            p[2:,   0:-2], p[2:,   1:-1], p[2:,   2:],
+        ])
+    return out
+
 
 def main():
     files = sorted(f for f in os.listdir(B.RadarImageSubfolder) if f.lower().endswith(".png"))
@@ -55,8 +75,12 @@ def main():
         raise SystemExit("No usable frames (all wrong size?) -- nothing to build.")
 
     baseline = counts.argmax(axis=0).astype(np.uint8)
+    n_core = int((baseline > 0).sum())
+
+    baseline = dilate_max(baseline, DILATE_PX)
     n_clutter = int((baseline > 0).sum())
-    print(f"used {used} frames; {n_clutter} source pixels have a nonzero usual level (candidate clutter)")
+    print(f"used {used} frames; {n_core} core clutter pixels, {n_clutter} after "
+          f"{DILATE_PX}px dilation to cover the fringe")
 
     np.save(B.CLUTTER_BASELINE_PATH, baseline)
     print(f"wrote {B.CLUTTER_BASELINE_PATH}")
