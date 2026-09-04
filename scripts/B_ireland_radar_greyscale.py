@@ -56,6 +56,11 @@ S  = _n * TILE_SIZE / (2 * math.pi)
 BX = _n * TILE_SIZE / 2 - TILE_X0 * TILE_SIZE
 BY = _n * TILE_SIZE / 2 - TILE_Y0 * TILE_SIZE
 
+# manually measured against a saved frame: strip this many source pixels off
+# the west and south edges before the view window is allowed to reach them
+WEST_CUTOFF_PX  = 130
+SOUTH_CUTOFF_PX = 55
+
 IRELAND_BOUNDS = (-10.4782, 51.4457, -5.4308, 55.3864)   # minlon, minlat, maxlon, maxlat
 
 # --- greyscale look (0 = black, 255 = white) ---
@@ -203,11 +208,12 @@ def build_window():
 
     hw, hh = Wwin / 2, Hwin / 2
 
-    # never request geography past the tile mosaic's own edge -- beyond it
-    # there's no data, and PX/PY clipping would just stretch the edge row/
-    # column across the gap instead of showing anything real.
-    tile_x_min, tile_x_max = (0 - BX) / S, (IMG_W - BX) / S
-    tile_y_min, tile_y_max = (BY - IMG_H) / S, (BY - 0) / S
+    # never request geography past the usable data edge -- beyond it there's
+    # no data (or, on the west/south, the measured dead strip), and PX/PY
+    # clipping would just stretch the edge row/column across the gap instead
+    # of showing anything real.
+    tile_x_min, tile_x_max = (WEST_CUTOFF_PX - BX) / S, (IMG_W - BX) / S
+    tile_y_min, tile_y_max = (BY - (IMG_H - SOUTH_CUTOFF_PX)) / S, (BY - 0) / S
     west, east = max(cx - hw, tile_x_min), min(cx + hw, tile_x_max)
     south, north = max(cy - hh, tile_y_min), min(cy + hh, tile_y_max)
     cx, hw = (west + east) / 2, (east - west) / 2
