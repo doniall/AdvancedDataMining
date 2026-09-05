@@ -19,9 +19,9 @@ REQUIRES
     Keep ireland_coastline.json and ireland_counties.json in the same folder.
     A_met_radar_probe.py must also be in the same folder (used for fetching).
     Optional: run D_ship_ais.py repeatedly (it appends to a history file) to
-    draw ships as they were at each frame's own timestamp, with a trail back
-    to their position ~15 minutes earlier -- if ship_history.json doesn't
-    exist yet, ships are just skipped.
+    draw ships as they were at each frame's own timestamp, with a trail
+    through their last few recorded positions -- if ship_history.json
+    doesn't exist yet, ships are just skipped.
 
 NOTE
     The projection is exact, not fitted: gdal.met.ie serves standard Web
@@ -139,14 +139,23 @@ def load_counties():
 
 SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
 
-# how a ship's "now" and "15 minutes ago" positions are picked out of its
-# recorded history, relative to the timestamp of the frame being rendered
-# (not wall-clock time -- see ships_at())
-SHIP_MAX_AGE_MINUTES = 20          # ignore a ship with no sample this fresh --
-                                    # stale AIS is worse than no marker at all
-SHIP_TRAIL_MINUTES = 15
-SHIP_TRAIL_TOLERANCE_MINUTES = 5   # how far a sample may sit from exactly
-                                    # -15min and still count as the trail start
+# how a ship's "now" position and trail are picked out of its recorded
+# history, relative to the timestamp of the frame being rendered (not
+# wall-clock time -- see ships_at())
+SHIP_MAX_AGE_MINUTES = 120         # matches D_ship_ais.py's HISTORY_RETENTION_MINUTES --
+                                    # a ship's last known position keeps showing for as
+                                    # long as the history file actually still has it, so
+                                    # it doesn't flicker off every time one AIS fetch
+                                    # misses it (a 15-min minimum cadence plus normal
+                                    # coverage gaps means "no sample in the last 20 min"
+                                    # was the common case, not the exception)
+SHIP_TRAIL_MAX_POINTS = 3          # up to this many of the ship's most recent
+                                    # PRIOR records, drawn as an actual path
+SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its
+                                    # own most recent record -- matches
+                                    # HISTORY_RETENTION_MINUTES, so the trail never
+                                    # reaches back further than the history can
+                                    # actually still contain
 
 
 def load_ship_history():
@@ -166,31 +175,32 @@ def _nearest_sample(samples, target):
 
 
 def ships_at(history, at_time):
-    """Current position + ~15-minutes-ago trail start for each ship, as of
-    at_time -- the frame's own timestamp, not whenever this script happens to
-    run. That's what lets a backlog of radar frames each show ships as they
-    actually were at that frame's time, instead of all showing today's
-    living AIS position stamped onto every one of them."""
+    """Current position + up to the last SHIP_TRAIL_MAX_POINTS prior recorded
+    positions for each ship, as of at_time -- the frame's own timestamp, not
+    whenever this script happens to run. That's what lets a backlog of radar
+    frames each show ships as they actually were at that frame's time,
+    instead of all showing today's living AIS position stamped onto every
+    one of them."""
     out = []
     for samples in history.values():
         now_s = _nearest_sample(samples, at_time)
         if now_s is None:
             continue
-        if abs((dt.datetime.fromisoformat(now_s["t"]) - at_time).total_seconds()) / 60 > SHIP_MAX_AGE_MINUTES:
+        now_t = dt.datetime.fromisoformat(now_s["t"])
+        if abs((now_t - at_time).total_seconds()) / 60 > SHIP_MAX_AGE_MINUTES:
             continue
 
-        trail_target = at_time - dt.timedelta(minutes=SHIP_TRAIL_MINUTES)
-        before_s = _nearest_sample(samples, trail_target)
-        trail_lat = trail_lon = None
-        if before_s is not None:
-            before_off = abs((dt.datetime.fromisoformat(before_s["t"]) - trail_target).total_seconds()) / 60
-            if before_off <= SHIP_TRAIL_TOLERANCE_MINUTES:
-                trail_lat, trail_lon = before_s["lat"], before_s["lon"]
+        window_start = now_t - dt.timedelta(minutes=SHIP_TRAIL_WINDOW_MINUTES)
+        prior = sorted(
+            (s for s in samples if window_start <= dt.datetime.fromisoformat(s["t"]) < now_t),
+            key=lambda s: s["t"],
+        )
+        trail = [{"lat": s["lat"], "lon": s["lon"]} for s in prior[-SHIP_TRAIL_MAX_POINTS:]]
 
         out.append({
             "lat": now_s["lat"], "lon": now_s["lon"],
             "heading": now_s.get("heading"), "cog": now_s.get("cog"),
-            "trail_lat": trail_lat, "trail_lon": trail_lon,
+            "trail": trail,
         })
     return out
 
@@ -531,19 +541,19 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
             continue
         x, y = ll2r(lon, lat)
 
-        tlon, tlat = ship.get("trail_lon"), ship.get("trail_lat")
-        trail = tlon is not None and tlat is not None
+        trail = ship.get("trail") or []
         if trail:
-            tx, ty = ll2r(tlon, tlat)
-            d.line([(tx, ty), (x, y)], fill=SHIP_HALO, width=3)
-            d.line([(tx, ty), (x, y)], fill=SHIP_MARK, width=1)
+            pts = [ll2r(p["lon"], p["lat"]) for p in trail] + [(x, y)]
+            d.line(pts, fill=SHIP_HALO, width=3, joint="curve")
+            d.line(pts, fill=SHIP_MARK, width=1, joint="curve")
 
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
             cog if cog is not None and cog < 360 else None)
         if direction is None and trail:
-            # no reported heading/course -- the trail's own bearing is more
-            # informative than an undirected mark
+            # no reported heading/course -- the bearing from the most recent
+            # prior point is more informative than an undirected mark
+            tx, ty = ll2r(trail[-1]["lon"], trail[-1]["lat"])
             direction = math.degrees(math.atan2(x - tx, ty - y)) % 360
         _draw_ship(d, x, y, direction)
 
