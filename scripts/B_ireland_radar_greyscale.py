@@ -268,10 +268,19 @@ NEARBY_MIN_FRACTION = 0.05
 # genuinely touching the clutter spot can easily be well under
 # NEARBY_MIN_FRACTION of the wide NEARBY_RADIUS_PX window (a shower a few
 # pixels across is a tiny fraction of a 25x25 area), even though it's
-# unambiguously real rain right at the edge. Any real rain at all within
-# this small radius is trusted outright -- this is the literal "include
-# them when other rain has hit" case, independent of the wider-area check.
+# unambiguously real rain right at the edge. A small coherent patch of real
+# rain within this small radius is trusted outright, independent of the
+# wider-area check -- this is the literal "include them when other rain has
+# hit" case.
 TOUCH_RADIUS_PX = 4
+
+# ...but not just ANY real-rain pixel: classify()'s median-filter pass only
+# ever fills gaps *toward* rain, never removes an isolated false-positive
+# pixel (anti-aliasing noise, a tile-seam artifact), so a single stray
+# speckle can and does show up in real, live data. Requiring a small
+# coherent cluster rather than one pixel tells an actual shower apart from
+# that kind of noise, without falling back to the wide-area's much higher bar.
+TOUCH_MIN_COUNT = 3
 
 
 def _box_sum(a, radius):
@@ -307,7 +316,7 @@ def suppress_clutter_source(full_lvl):
     window_area = (2 * NEARBY_RADIUS_PX + 1) ** 2
     nearby_rain_frac = _box_sum(real_rain, NEARBY_RADIUS_PX) / window_area
     surrounded = nearby_rain_frac >= NEARBY_MIN_FRACTION
-    touching = _box_sum(real_rain, TOUCH_RADIUS_PX) > 0
+    touching = _box_sum(real_rain, TOUCH_RADIUS_PX) >= TOUCH_MIN_COUNT
     corroborated = surrounded | touching
 
     suppress = clutter & ~above_baseline & ~corroborated
