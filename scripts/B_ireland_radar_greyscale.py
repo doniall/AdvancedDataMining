@@ -18,8 +18,10 @@ REQUIRES
     pip3 install numpy pillow certifi
     Keep ireland_coastline.json and ireland_counties.json in the same folder.
     A_met_radar_probe.py must also be in the same folder (used for fetching).
-    Optional: run D_ship_ais.py first to draw live ship positions from
-    ship_positions.json -- if that file doesn't exist, ships are just skipped.
+    Optional: run D_ship_ais.py repeatedly (it appends to a history file) to
+    draw ships as they were at each frame's own timestamp, with a trail back
+    to their position ~15 minutes earlier -- if ship_history.json doesn't
+    exist yet, ships are just skipped.
 
 NOTE
     The projection is exact, not fitted: gdal.met.ie serves standard Web
@@ -135,15 +137,62 @@ def load_counties():
     with open(os.path.join(here, "ireland_counties.json")) as f:
         return [np.array(r, float) for r in json.load(f)]
 
-SHIP_POSITIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_positions.json")
+SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
 
-def load_ships():
-    """Live ship positions saved by D_ship_ais.py -- [] (no markers) if that
-    script hasn't been run yet, so ship display is entirely optional."""
-    if not os.path.exists(SHIP_POSITIONS_PATH):
-        return []
-    with open(SHIP_POSITIONS_PATH) as f:
+# how a ship's "now" and "15 minutes ago" positions are picked out of its
+# recorded history, relative to the timestamp of the frame being rendered
+# (not wall-clock time -- see ships_at())
+SHIP_MAX_AGE_MINUTES = 20          # ignore a ship with no sample this fresh --
+                                    # stale AIS is worse than no marker at all
+SHIP_TRAIL_MINUTES = 15
+SHIP_TRAIL_TOLERANCE_MINUTES = 5   # how far a sample may sit from exactly
+                                    # -15min and still count as the trail start
+
+
+def load_ship_history():
+    """Per-ship position history recorded by D_ship_ais.py -- {} (no markers)
+    if that script hasn't been run yet, so ship display is entirely optional."""
+    if not os.path.exists(SHIP_HISTORY_PATH):
+        return {}
+    with open(SHIP_HISTORY_PATH) as f:
         return json.load(f)
+
+
+def _nearest_sample(samples, target):
+    """The sample whose timestamp is closest to `target` (before or after)."""
+    if not samples:
+        return None
+    return min(samples, key=lambda s: abs((dt.datetime.fromisoformat(s["t"]) - target).total_seconds()))
+
+
+def ships_at(history, at_time):
+    """Current position + ~15-minutes-ago trail start for each ship, as of
+    at_time -- the frame's own timestamp, not whenever this script happens to
+    run. That's what lets a backlog of radar frames each show ships as they
+    actually were at that frame's time, instead of all showing today's
+    living AIS position stamped onto every one of them."""
+    out = []
+    for samples in history.values():
+        now_s = _nearest_sample(samples, at_time)
+        if now_s is None:
+            continue
+        if abs((dt.datetime.fromisoformat(now_s["t"]) - at_time).total_seconds()) / 60 > SHIP_MAX_AGE_MINUTES:
+            continue
+
+        trail_target = at_time - dt.timedelta(minutes=SHIP_TRAIL_MINUTES)
+        before_s = _nearest_sample(samples, trail_target)
+        trail_lat = trail_lon = None
+        if before_s is not None:
+            before_off = abs((dt.datetime.fromisoformat(before_s["t"]) - trail_target).total_seconds()) / 60
+            if before_off <= SHIP_TRAIL_TOLERANCE_MINUTES:
+                trail_lat, trail_lon = before_s["lat"], before_s["lon"]
+
+        out.append({
+            "lat": now_s["lat"], "lon": now_s["lon"],
+            "heading": now_s.get("heading"), "cog": now_s.get("cog"),
+            "trail_lat": trail_lat, "trail_lon": trail_lon,
+        })
+    return out
 
 def is_background(r, g, b):
     """True where a pixel matches Met Eireann's dry-but-in-range olive,
@@ -415,10 +464,23 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         lon, lat = ship.get("lon"), ship.get("lat")
         if lon is None or lat is None:
             continue
+        x, y = ll2r(lon, lat)
+
+        tlon, tlat = ship.get("trail_lon"), ship.get("trail_lat")
+        trail = tlon is not None and tlat is not None
+        if trail:
+            tx, ty = ll2r(tlon, tlat)
+            d.line([(tx, ty), (x, y)], fill=SHIP_HALO, width=3)
+            d.line([(tx, ty), (x, y)], fill=SHIP_MARK, width=1)
+
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
             cog if cog is not None and cog < 360 else None)
-        _draw_ship(d, *ll2r(lon, lat), direction)
+        if direction is None and trail:
+            # no reported heading/course -- the trail's own bearing is more
+            # informative than an undirected mark
+            direction = math.degrees(math.atan2(x - tx, ty - y)) % 360
+        _draw_ship(d, x, y, direction)
 
     mx, my = ll2r(LOCATION_LON, LOCATION_LAT)
     rr = 3
@@ -429,7 +491,7 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         label_font = _load_font(18)
         time_font = _load_font(30)
         d.text((16, 12), "Met Éireann", fill=COAST_LINE, font=label_font)
-        d.text((16, 34), frame_time.strftime("%H:%M, %d/%m/%Y"), fill=COAST_LINE, font=time_font)
+        d.text((16, 34), frame_time.strftime("%d/%m/%Y, %H:%M"), fill=COAST_LINE, font=time_font)
 
     return img
 
@@ -457,7 +519,7 @@ def main():
     #remove any entries that are not .png files
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
-    ships = load_ships()
+    ship_history = load_ship_history()
     print(f"test")
     for imgpath in png_files:
         print(f"{imgpath}")
@@ -471,6 +533,8 @@ def main():
             .astimezone(ZoneInfo("Europe/Dublin"))
             if stamp else None
         )
+        at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
+        ships = ships_at(ship_history, at_time)
         img = render(src, load_counties(), load_coastline(), frame_time, ships)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)

@@ -2,9 +2,16 @@
 """
 D_ship_ais.py
 
-Fetches live ship positions (AIS) in Irish coastal waters and saves them to
-ship_positions.json so B_ireland_radar_greyscale.py can draw them as
-markers on the rendered map.
+Fetches live ship positions (AIS) in Irish coastal waters and appends them
+to ship_history.json -- a per-ship log of recent positions -- so
+B_ireland_radar_greyscale.py can draw both a ship's current position and a
+trail back to where it was ~15 minutes earlier.
+
+Run this repeatedly (e.g. every few minutes, alongside A_met_radar_probe.py)
+so the history actually has a ~15-minute-old sample to draw a trail from --
+a single one-off run only ever has "now", so no trail will show until it's
+been running for a while. Each run appends one snapshot per ship and prunes
+anything older than HISTORY_RETENTION_MINUTES.
 
 AIS ("Automatic Identification System") is the shipborne transponder itself --
 every commercial/large vessel broadcasts its own GPS position over VHF. This
@@ -25,6 +32,7 @@ Needs: pip install websockets
 """
 
 import asyncio
+import datetime as dt
 import json
 import os
 import time
@@ -44,7 +52,13 @@ API_KEY = os.environ.get("AISSTREAM_API_KEY", "")
 BOUNDING_BOX = [[[49.5, -11.5], [56.0, -3.5]]]
 
 LISTEN_SECONDS = 45   # how long to sit on the stream before saving what arrived
-OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_positions.json")
+
+# how long a position sample is kept before being pruned -- generous margin
+# over the 15-minute trail B_ireland_radar_greyscale.py draws, and over any
+# backlog of unrendered radar frames it might need to match samples against
+HISTORY_RETENTION_MINUTES = 360
+
+HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
 
 
 def _handle_message(raw, ships):
@@ -60,13 +74,11 @@ def _handle_message(raw, ships):
     if mmsi is None:
         return
     ships[mmsi] = {
-        "mmsi": mmsi,
         "name": (meta.get("ShipName") or "").strip(),
         "lat": report.get("Latitude"),
         "lon": report.get("Longitude"),
         "heading": report.get("TrueHeading"),   # 511 = not available
         "cog": report.get("Cog"),               # course over ground, degrees
-        "time_utc": meta.get("time_utc"),
     }
 
 
@@ -93,7 +105,27 @@ async def collect():
                 _handle_message(raw, ships)
     except Exception as e:
         print(f"    (error: {e})")
-    return list(ships.values())
+    return ships
+
+
+def _load_history():
+    if not os.path.exists(HISTORY_PATH):
+        return {}
+    with open(HISTORY_PATH) as f:
+        return json.load(f)
+
+
+def _prune(history, now):
+    """Drop samples older than HISTORY_RETENTION_MINUTES, and any ship left
+    with none -- keeps the file from growing without bound."""
+    cutoff = now - dt.timedelta(minutes=HISTORY_RETENTION_MINUTES)
+    for mmsi in list(history):
+        kept = [p for p in history[mmsi] if dt.datetime.fromisoformat(p["t"]) >= cutoff]
+        if kept:
+            history[mmsi] = kept
+        else:
+            del history[mmsi]
+    return history
 
 
 def main():
@@ -108,9 +140,25 @@ def main():
 
     print(f"listening for AIS position reports for {LISTEN_SECONDS}s...")
     ships = asyncio.run(collect())
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump(ships, f, indent=2)
-    print(f"saved {len(ships)} ship position(s) to {OUTPUT_PATH}")
+
+    # timestamp every ship caught in this run with receipt time, rather than
+    # trying to parse aisstream's own reported time_utc string -- receipt
+    # lag is seconds, negligible against the 15-minute trail this feeds
+    now = dt.datetime.now(dt.timezone.utc)
+    stamp = now.isoformat()
+
+    history = _load_history()
+    for mmsi, ship in ships.items():
+        entry = dict(ship, t=stamp)
+        history.setdefault(str(mmsi), []).append(entry)
+    history = _prune(history, now)
+
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=2)
+
+    n_samples = sum(len(v) for v in history.values())
+    print(f"recorded {len(ships)} ship position(s) this run; history now holds "
+          f"{n_samples} samples across {len(history)} ships")
 
 
 if __name__ == "__main__":
