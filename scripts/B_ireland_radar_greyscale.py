@@ -257,6 +257,32 @@ def _load_clutter_baseline():
     return _clutter_baseline
 
 
+CLUTTER_CEILING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clutter_ceiling.npy")
+_clutter_ceiling = None
+_warned_no_clutter_ceiling = False
+
+
+def _load_clutter_ceiling():
+    """Per-source-pixel highest level ever actually observed there, built by
+    C_build_clutter_baseline.py. A noisy, strongly-active clutter spot (high
+    mode) can swing several levels above its own mode on an ordinary bad
+    frame, so the unconditional "trust it outright" escape hatch requires
+    beating this historical ceiling, not just the mode -- falls back to the
+    mode itself (the older, more easily tripped behaviour) if the ceiling
+    file hasn't been built yet."""
+    global _clutter_ceiling, _warned_no_clutter_ceiling
+    if _clutter_ceiling is None:
+        if os.path.exists(CLUTTER_CEILING_PATH):
+            _clutter_ceiling = np.load(CLUTTER_CEILING_PATH)
+        else:
+            _clutter_ceiling = _load_clutter_baseline()
+            if not _warned_no_clutter_ceiling:
+                print("note: no clutter_ceiling.npy yet -- run C_build_clutter_baseline.py "
+                      "again to reduce false triggers from noisy clutter spots")
+                _warned_no_clutter_ceiling = True
+    return _clutter_ceiling
+
+
 # radius (source pixels) checked around each clutter pixel for corroborating
 # rain elsewhere -- a real rain system doesn't have a precise hole exactly at
 # a clutter spot, so if enough real rain surrounds it, trust this pixel too
@@ -295,23 +321,31 @@ def _box_sum(a, radius):
 def suppress_clutter_source(full_lvl):
     """Zero out a clutter pixel's level if it's at or below its own historical
     baseline AND there's no real rain corroborating it nearby. Real rain that
-    exceeds the usual level, is touching the clutter spot directly, or is
-    backed by a wider rain system surrounding it, still shows -- operates on
-    the full source-resolution classification so "nearby" means real
-    geography, not output pixels."""
+    beats the spot's historical ceiling, is touching the clutter spot
+    directly, or is backed by a wider rain system surrounding it, still
+    shows -- operates on the full source-resolution classification so
+    "nearby" means real geography, not output pixels."""
     baseline = _load_clutter_baseline()
+    ceiling = _load_clutter_ceiling()
     clutter = baseline > 0
 
-    # a clutter pixel already reading above its own baseline is real evidence
-    # of weather on its own (it's never suppressed below -- see `suppress`),
-    # so it should still be able to corroborate its at-or-below-baseline
-    # neighbours even though it's inside the (dilated) clutter mask. Without
-    # this, growing DILATE_PX in C_build_clutter_baseline.py to cover a noisy
+    # a clutter pixel already beating its own historical ceiling is real
+    # evidence of weather on its own (it's never suppressed below -- see
+    # `suppress`), so it should still be able to corroborate its neighbours
+    # even though it's inside the (dilated) clutter mask. Without this,
+    # growing DILATE_PX in C_build_clutter_baseline.py to cover a noisy
     # fringe also shrinks the pool of nearby evidence real rain can use to
     # prove itself, making a wider dilation actively worse at letting real
     # rain through right where the fringe is widest.
-    above_baseline = full_lvl > baseline
-    real_rain = (full_lvl > 0) & (~clutter | above_baseline)
+    #
+    # the escape hatch itself checks the CEILING (highest ever observed),
+    # not the mode: a noisy, strongly-active spot (e.g. mode 9) can swing
+    # several levels above its own mode on an ordinary bad frame with no
+    # real rain involved at all, so "exceeds the mode" alone tripped on
+    # nothing but the artifact's normal noise. Beating the ceiling means a
+    # genuinely unprecedented reading at that exact spot.
+    exceeds_ceiling = full_lvl > ceiling
+    real_rain = (full_lvl > 0) & (~clutter | exceeds_ceiling)
 
     window_area = (2 * NEARBY_RADIUS_PX + 1) ** 2
     nearby_rain_frac = _box_sum(real_rain, NEARBY_RADIUS_PX) / window_area
@@ -319,7 +353,7 @@ def suppress_clutter_source(full_lvl):
     touching = _box_sum(real_rain, TOUCH_RADIUS_PX) >= TOUCH_MIN_COUNT
     corroborated = surrounded | touching
 
-    suppress = clutter & ~above_baseline & ~corroborated
+    suppress = clutter & ~exceeds_ceiling & ~corroborated
     return np.where(suppress, 0, full_lvl)
 
 

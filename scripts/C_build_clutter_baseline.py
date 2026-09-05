@@ -11,13 +11,23 @@ exceeds the usual level at those same spots.
 For each source pixel, the baseline is the MODE (most frequently seen)
 classified rain level across every saved frame. A location that shows
 drizzle in most frames regardless of what else is happening gets a
-nonzero baseline; a location that's usually dry gets 0.
-B_ireland_radar_greyscale.render() then only treats a pixel as rain if
-its current level is strictly above its own baseline.
+nonzero baseline; a location that's usually dry gets 0. This baseline
+defines the clutter mask (which pixels get suppressed at all) and the
+"usual" level a corroborated reading is compared against.
 
-Run this periodically as more frames accumulate in 0_RadarPNG/ -- the
-more history, the more reliable the baseline. Re-running overwrites
-clutter_baseline.npy.
+Alongside it, a CEILING is also recorded: the highest level ever actually
+observed at that pixel across the whole history. A noisy, strongly-active
+artifact (e.g. mode 9) can still swing several levels above its own mode on
+an ordinary bad frame, so "exceeds the mode" alone is too easy to trip with
+no real rain involved. B_ireland_radar_greyscale.py's unconditional
+"trust it, no corroboration needed" escape hatch requires beating the
+CEILING instead -- a genuinely unprecedented reading -- while corroboration
+(real rain touching or surrounding the spot) can still unsuppress a reading
+anywhere between the mode and the ceiling.
+
+Run this periodically as more frames accumulate in 0_RadarPNG/ -- the more
+history, the more reliable both the baseline and the ceiling. Re-running
+overwrites clutter_baseline.npy and clutter_ceiling.npy.
 """
 
 import os
@@ -56,6 +66,7 @@ def main():
     print(f"building baseline from {len(files)} frames")
 
     counts = np.zeros((NUM_LEVELS, B.IMG_H, B.IMG_W), np.int32)
+    ceiling = np.zeros((B.IMG_H, B.IMG_W), np.uint8)
     used = 0
     for i, fn in enumerate(files):
         src = Image.open(os.path.join(B.RadarImageSubfolder, fn)).convert("RGB")
@@ -67,6 +78,7 @@ def main():
         lvl = B.classify(A[:, :, 0], A[:, :, 1], A[:, :, 2])
         for k in range(NUM_LEVELS):
             counts[k] += (lvl == k)
+        ceiling = np.maximum(ceiling, lvl.astype(np.uint8))
         used += 1
         if used % 50 == 0:
             print(f"  ...{used}/{len(files)}")
@@ -82,8 +94,15 @@ def main():
     print(f"used {used} frames; {n_core} core clutter pixels, {n_clutter} after "
           f"{DILATE_PX}px dilation to cover the fringe")
 
+    # dilated the same way as the baseline so the ceiling's fringe coverage
+    # matches the clutter mask's -- a fringe pixel pulled into the mask by
+    # dilation should get the same noise-ceiling protection as its neighbour
+    ceiling = dilate_max(ceiling, DILATE_PX)
+
     np.save(B.CLUTTER_BASELINE_PATH, baseline)
     print(f"wrote {B.CLUTTER_BASELINE_PATH}")
+    np.save(B.CLUTTER_CEILING_PATH, ceiling)
+    print(f"wrote {B.CLUTTER_CEILING_PATH}")
 
 
 if __name__ == "__main__":
