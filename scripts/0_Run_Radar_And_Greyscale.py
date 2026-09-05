@@ -21,7 +21,7 @@ print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"
 try:
     B_ireland_radar_greyscale.main()
-except:
+except Exception as e:
     print(f"Greyscale production failed ({e})")
-    
+
 print("Goodbye!")
