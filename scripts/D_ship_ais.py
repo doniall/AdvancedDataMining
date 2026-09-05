@@ -55,7 +55,10 @@ API_KEY = os.environ.get("AISSTREAM_API_KEY", "")
 # view exactly -- ships outside the frame just won't show.
 BOUNDING_BOX = [[[49.5, -11.5], [56.0, -3.5]]]
 
-LISTEN_SECONDS = 90   # how long to sit on the stream before saving what arrived
+LISTEN_SECONDS = 60   # how long to sit on the stream before saving what arrived --
+                       # meant to be run independently (its own cron/scheduler
+                       # entry) every MIN_FETCH_INTERVAL_MINUTES, not called from
+                       # 0_Run_Radar_And_Greyscale.py's own cadence
 
 # a ship's last recorded position is kept for this long after it was last
 # seen, then pruned -- still comfortably past the 15-minute trail
