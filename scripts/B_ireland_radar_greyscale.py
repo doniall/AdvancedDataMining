@@ -154,7 +154,7 @@ SHIP_MAX_AGE_MINUTES = 120         # how much of a ship's history D_ship_ais.py'
                                     # 15-min minimum cadence plus normal coverage gaps
                                     # means "no sample in the last 20 min" was the common
                                     # case, not the exception, before this was raised)
-SHIP_TRAIL_MAX_POINTS = 3          # up to this many of the ship's most recent
+SHIP_TRAIL_MAX_POINTS = 5          # up to this many of the ship's most recent
                                     # PRIOR records, drawn as an actual path
 SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its own
                                     # most recent record -- same "last 2h mapped" rule
@@ -218,6 +218,7 @@ def ships_at(history, at_time):
             "lat": now_s["lat"], "lon": now_s["lon"],
             "heading": now_s.get("heading"), "cog": now_s.get("cog"),
             "trail": trail,
+            "age_minutes": (at_time - now_t).total_seconds() / 60,
         })
     return out
 
@@ -431,9 +432,13 @@ def _ship_triangle(x, y, direction_deg, size):
     return [nose, left, right]
 
 
-def _draw_ship(d, x, y, direction_deg):
+def _draw_ship(d, x, y, direction_deg, mark_fill=SHIP_MARK):
+    """mark_fill lets the caller fade a stale ship's mark toward BACKGROUND
+    (255) as it ages -- SHIP_HALO (also 255) never needs to change, since
+    it's already background-neutral and only shows up against darker
+    things like rain, which fading the mark doesn't affect."""
     d.polygon(_ship_triangle(x, y, direction_deg, SHIP_SIZE + 2), fill=SHIP_HALO)
-    d.polygon(_ship_triangle(x, y, direction_deg, SHIP_SIZE), fill=SHIP_MARK)
+    d.polygon(_ship_triangle(x, y, direction_deg, SHIP_SIZE), fill=mark_fill)
 
 
 def fill_black(A, thresh=95, max_iter=16):
@@ -572,7 +577,14 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
             # prior point is more informative than an undirected mark
             tx, ty = ll2r(trail[-1]["lon"], trail[-1]["lat"])
             direction = math.degrees(math.atan2(x - tx, ty - y)) % 360
-        _draw_ship(d, x, y, direction)
+
+        # fade the mark toward the background as the ship's data gets older,
+        # reaching full background (invisible) right at SHIP_MAX_AGE_MINUTES --
+        # the same point it would otherwise just vanish outright, so a stale
+        # ship fades smoothly out of view instead of popping off the map
+        age_frac = min(max(ship.get("age_minutes", 0) / SHIP_MAX_AGE_MINUTES, 0), 1)
+        mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
+        _draw_ship(d, x, y, direction, mark_fill)
 
     mx, my = ll2r(LOCATION_LON, LOCATION_LAT)
     rr = 3
