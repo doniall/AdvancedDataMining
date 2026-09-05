@@ -283,12 +283,22 @@ def suppress_clutter_source(full_lvl):
     baseline = _load_clutter_baseline()
     clutter = baseline > 0
 
-    real_rain = (full_lvl > 0) & ~clutter   # exclude clutter pixels as their own evidence
+    # a clutter pixel already reading above its own baseline is real evidence
+    # of weather on its own (it's never suppressed below -- see `suppress`),
+    # so it should still be able to corroborate its at-or-below-baseline
+    # neighbours even though it's inside the (dilated) clutter mask. Without
+    # this, growing DILATE_PX in C_build_clutter_baseline.py to cover a noisy
+    # fringe also shrinks the pool of nearby evidence real rain can use to
+    # prove itself, making a wider dilation actively worse at letting real
+    # rain through right where the fringe is widest.
+    above_baseline = full_lvl > baseline
+    real_rain = (full_lvl > 0) & (~clutter | above_baseline)
+
     window_area = (2 * NEARBY_RADIUS_PX + 1) ** 2
     nearby_rain_frac = _box_sum(real_rain, NEARBY_RADIUS_PX) / window_area
     corroborated = nearby_rain_frac >= NEARBY_MIN_FRACTION
 
-    suppress = clutter & (full_lvl <= baseline) & ~corroborated
+    suppress = clutter & ~above_baseline & ~corroborated
     return np.where(suppress, 0, full_lvl)
 
 
