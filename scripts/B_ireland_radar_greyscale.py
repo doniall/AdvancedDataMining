@@ -264,6 +264,15 @@ def _load_clutter_baseline():
 NEARBY_RADIUS_PX = 12
 NEARBY_MIN_FRACTION = 0.05
 
+# a *much* tighter radius for literal contact: a small, localised shower
+# genuinely touching the clutter spot can easily be well under
+# NEARBY_MIN_FRACTION of the wide NEARBY_RADIUS_PX window (a shower a few
+# pixels across is a tiny fraction of a 25x25 area), even though it's
+# unambiguously real rain right at the edge. Any real rain at all within
+# this small radius is trusted outright -- this is the literal "include
+# them when other rain has hit" case, independent of the wider-area check.
+TOUCH_RADIUS_PX = 4
+
 
 def _box_sum(a, radius):
     """Sum of `a` over a (2*radius+1) square window centred on each cell,
@@ -277,9 +286,10 @@ def _box_sum(a, radius):
 def suppress_clutter_source(full_lvl):
     """Zero out a clutter pixel's level if it's at or below its own historical
     baseline AND there's no real rain corroborating it nearby. Real rain that
-    either exceeds the usual level, or is backed by rain surrounding the
-    clutter spot, still shows -- operates on the full source-resolution
-    classification so "nearby" means real geography, not output pixels."""
+    exceeds the usual level, is touching the clutter spot directly, or is
+    backed by a wider rain system surrounding it, still shows -- operates on
+    the full source-resolution classification so "nearby" means real
+    geography, not output pixels."""
     baseline = _load_clutter_baseline()
     clutter = baseline > 0
 
@@ -296,7 +306,9 @@ def suppress_clutter_source(full_lvl):
 
     window_area = (2 * NEARBY_RADIUS_PX + 1) ** 2
     nearby_rain_frac = _box_sum(real_rain, NEARBY_RADIUS_PX) / window_area
-    corroborated = nearby_rain_frac >= NEARBY_MIN_FRACTION
+    surrounded = nearby_rain_frac >= NEARBY_MIN_FRACTION
+    touching = _box_sum(real_rain, TOUCH_RADIUS_PX) > 0
+    corroborated = surrounded | touching
 
     suppress = clutter & ~above_baseline & ~corroborated
     return np.where(suppress, 0, full_lvl)
