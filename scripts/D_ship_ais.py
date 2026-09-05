@@ -5,17 +5,17 @@ D_ship_ais.py
 Fetches live ship positions (AIS) in Irish coastal waters and appends them
 to ship_history.json -- a per-ship log of recent positions -- so
 B_ireland_radar_greyscale.py can draw both a ship's current position and a
-trail back to where it was ~15 minutes earlier.
+trail through its last few recorded ones.
 
-Run this repeatedly (e.g. every few minutes, alongside A_met_radar_probe.py)
-so the history actually has a ~15-minute-old sample to draw a trail from --
-a single one-off run only ever has "now", so no trail will show until it's
-been running for a while. Calling it more often than that doesn't help
-though: main() no-ops unless at least MIN_FETCH_INTERVAL_MINUTES has passed
-since the last attempt, so it's safe to call from a tighter loop than you
-actually want to hit aisstream.io with. Each successful run appends one
-snapshot per ship; a ship's most recent position is kept for
-HISTORY_RETENTION_MINUTES after it was last seen, then pruned.
+Meant to be run on its own schedule (its own cron/scheduler entry) every
+MIN_FETCH_INTERVAL_MINUTES, independent of 0_Run_Radar_And_Greyscale.py's
+own cadence -- main() no-ops if called again before that interval has
+passed, so it's harmless to also call it from there if you want a fallback
+trigger. Each successful run appends one snapshot per ship; a ship's most
+recent position is kept in the file for HISTORY_RETENTION_MINUTES after it
+was last seen, then pruned -- that's storage retention only, independent of
+how much of it B_ireland_radar_greyscale.py actually renders (see its own
+SHIP_MAX_AGE_MINUTES / SHIP_TRAIL_WINDOW_MINUTES).
 
 AIS ("Automatic Identification System") is the shipborne transponder itself --
 every commercial/large vessel broadcasts its own GPS position over VHF. This
@@ -61,9 +61,14 @@ LISTEN_SECONDS = 60   # how long to sit on the stream before saving what arrived
                        # 0_Run_Radar_And_Greyscale.py's own cadence
 
 # a ship's last recorded position is kept for this long after it was last
-# seen, then pruned -- still comfortably past the 15-minute trail
-# B_ireland_radar_greyscale.py draws, and any backlog of unrendered frames
-HISTORY_RETENTION_MINUTES = 120
+# seen, then pruned -- this is STORAGE retention, purely how long
+# ship_history.json holds onto data. It's independent of how much of that
+# history B_ireland_radar_greyscale.py actually draws (its own
+# SHIP_MAX_AGE_MINUTES / SHIP_TRAIL_WINDOW_MINUTES, currently 2h) -- keeping
+# more here than gets rendered is fine, it just means older data sits
+# unused in the file until something (a future feature, manual inspection)
+# wants it.
+HISTORY_RETENTION_MINUTES = 7 * 24 * 60   # 7 days
 
 # don't hit aisstream.io more often than this -- calling main() more
 # frequently (e.g. from a tight cron loop or every time 0_Run_* fires) just
@@ -191,7 +196,10 @@ def main():
     history = _prune(history, now)
 
     with open(HISTORY_PATH, "w") as f:
-        json.dump(history, f, indent=2)
+        # compact, not indent=2 -- this file is read by code, not a person,
+        # and at a 7-day retention it's read and rewritten whole every run,
+        # so the pretty-printing overhead isn't free
+        json.dump(history, f, separators=(",", ":"))
 
     n_samples = sum(len(v) for v in history.values())
     print(f"recorded {len(ships)} ship position(s) this run; history now holds "

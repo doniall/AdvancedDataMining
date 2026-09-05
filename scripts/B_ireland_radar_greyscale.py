@@ -142,20 +142,24 @@ SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sh
 # how a ship's "now" position and trail are picked out of its recorded
 # history, relative to the timestamp of the frame being rendered (not
 # wall-clock time -- see ships_at())
-SHIP_MAX_AGE_MINUTES = 120         # matches D_ship_ais.py's HISTORY_RETENTION_MINUTES --
-                                    # a ship's last known position keeps showing for as
-                                    # long as the history file actually still has it, so
-                                    # it doesn't flicker off every time one AIS fetch
-                                    # misses it (a 15-min minimum cadence plus normal
-                                    # coverage gaps means "no sample in the last 20 min"
-                                    # was the common case, not the exception)
+SHIP_MAX_AGE_MINUTES = 120         # how much of a ship's history D_ship_ais.py's
+                                    # HISTORY_RETENTION_MINUTES keeps and how much of it
+                                    # gets DRAWN are deliberately separate: D can retain
+                                    # far more (e.g. 7 days) than this, and that's fine --
+                                    # this is purely "map only the last 2h of movement,"
+                                    # independent of how much sits unused in the file.
+                                    # A ship's last known position keeps showing for as
+                                    # long as it's within this window, so it doesn't
+                                    # flicker off every time one AIS fetch misses it (a
+                                    # 15-min minimum cadence plus normal coverage gaps
+                                    # means "no sample in the last 20 min" was the common
+                                    # case, not the exception, before this was raised)
 SHIP_TRAIL_MAX_POINTS = 3          # up to this many of the ship's most recent
                                     # PRIOR records, drawn as an actual path
-SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its
-                                    # own most recent record -- matches
-                                    # HISTORY_RETENTION_MINUTES, so the trail never
-                                    # reaches back further than the history can
-                                    # actually still contain
+SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its own
+                                    # most recent record -- same "last 2h mapped" rule
+                                    # as SHIP_MAX_AGE_MINUTES, kept as its own constant
+                                    # in case the two ever need to diverge
 
 
 def load_ship_history():
