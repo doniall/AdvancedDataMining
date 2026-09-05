@@ -10,8 +10,12 @@ trail back to where it was ~15 minutes earlier.
 Run this repeatedly (e.g. every few minutes, alongside A_met_radar_probe.py)
 so the history actually has a ~15-minute-old sample to draw a trail from --
 a single one-off run only ever has "now", so no trail will show until it's
-been running for a while. Each run appends one snapshot per ship and prunes
-anything older than HISTORY_RETENTION_MINUTES.
+been running for a while. Calling it more often than that doesn't help
+though: main() no-ops unless at least MIN_FETCH_INTERVAL_MINUTES has passed
+since the last attempt, so it's safe to call from a tighter loop than you
+actually want to hit aisstream.io with. Each successful run appends one
+snapshot per ship; a ship's most recent position is kept for
+HISTORY_RETENTION_MINUTES after it was last seen, then pruned.
 
 AIS ("Automatic Identification System") is the shipborne transponder itself --
 every commercial/large vessel broadcasts its own GPS position over VHF. This
@@ -53,12 +57,18 @@ BOUNDING_BOX = [[[49.5, -11.5], [56.0, -3.5]]]
 
 LISTEN_SECONDS = 45   # how long to sit on the stream before saving what arrived
 
-# how long a position sample is kept before being pruned -- generous margin
-# over the 15-minute trail B_ireland_radar_greyscale.py draws, and over any
-# backlog of unrendered radar frames it might need to match samples against
-HISTORY_RETENTION_MINUTES = 360
+# a ship's last recorded position is kept for this long after it was last
+# seen, then pruned -- still comfortably past the 15-minute trail
+# B_ireland_radar_greyscale.py draws, and any backlog of unrendered frames
+HISTORY_RETENTION_MINUTES = 120
+
+# don't hit aisstream.io more often than this -- calling main() more
+# frequently (e.g. from a tight cron loop or every time 0_Run_* fires) just
+# no-ops until enough time has passed since the last attempt
+MIN_FETCH_INTERVAL_MINUTES = 15
 
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
+LAST_FETCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_ais_last_fetch.txt")
 
 
 def _handle_message(raw, ships):
@@ -128,6 +138,19 @@ def _prune(history, now):
     return history
 
 
+def _last_fetch_time():
+    if not os.path.exists(LAST_FETCH_PATH):
+        return None
+    with open(LAST_FETCH_PATH) as f:
+        s = f.read().strip()
+    return dt.datetime.fromisoformat(s) if s else None
+
+
+def _record_fetch_time(t):
+    with open(LAST_FETCH_PATH, "w") as f:
+        f.write(t.isoformat())
+
+
 def main():
     if websockets is None:
         print("The 'websockets' package isn't installed -- run: pip3 install websockets")
@@ -138,6 +161,14 @@ def main():
               "file). Nothing fetched; rendering will proceed without ship markers.")
         return
 
+    last_fetch = _last_fetch_time()
+    if last_fetch is not None:
+        elapsed = (dt.datetime.now(dt.timezone.utc) - last_fetch).total_seconds() / 60
+        if elapsed < MIN_FETCH_INTERVAL_MINUTES:
+            print(f"last AIS fetch was {elapsed:.1f} min ago -- minimum cadence is "
+                  f"{MIN_FETCH_INTERVAL_MINUTES} min, skipping this run")
+            return
+
     print(f"listening for AIS position reports for {LISTEN_SECONDS}s...")
     ships = asyncio.run(collect())
 
@@ -146,6 +177,9 @@ def main():
     # lag is seconds, negligible against the 15-minute trail this feeds
     now = dt.datetime.now(dt.timezone.utc)
     stamp = now.isoformat()
+    _record_fetch_time(now)   # recorded even on a connection failure (ships
+                               # empty) -- a broken key/network won't retry
+                               # more often than the same 15-min cadence
 
     history = _load_history()
     for mmsi, ship in ships.items():
