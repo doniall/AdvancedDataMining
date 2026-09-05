@@ -5,7 +5,10 @@ import D_ship_ais
 #A_met_radar_probe
 
 print("Gathering Met Éireann's rainfall radar snapshots")
-A_met_radar_probe.main()
+try:
+    A_met_radar_probe.main()
+except Exception as e:
+    print(f"Met Éireann radar fetch failed ({e})")
 
 
 print("Gathering AIS data for ship positions")
@@ -16,6 +19,9 @@ except Exception as e:
 
 print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"
-B_ireland_radar_greyscale.main()
-
+try:
+    B_ireland_radar_greyscale.main()
+except:
+    print(f"Greyscale production failed ({e})")
+    
 print("Goodbye!")
