@@ -55,7 +55,7 @@ API_KEY = os.environ.get("AISSTREAM_API_KEY", "")
 # view exactly -- ships outside the frame just won't show.
 BOUNDING_BOX = [[[49.5, -11.5], [56.0, -3.5]]]
 
-LISTEN_SECONDS = 60   # how long to sit on the stream before saving what arrived --
+LISTEN_SECONDS = 90   # how long to sit on the stream before saving what arrived --
                        # meant to be run independently (its own cron/scheduler
                        # entry) every MIN_FETCH_INTERVAL_MINUTES, not called from
                        # 0_Run_Radar_And_Greyscale.py's own cadence
@@ -73,7 +73,7 @@ HISTORY_RETENTION_MINUTES = 7 * 24 * 60   # 7 days
 # don't hit aisstream.io more often than this -- calling main() more
 # frequently (e.g. from a tight cron loop or every time 0_Run_* fires) just
 # no-ops until enough time has passed since the last attempt
-MIN_FETCH_INTERVAL_MINUTES = 15
+MIN_FETCH_INTERVAL_MINUTES = 5
 
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
 LAST_FETCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_ais_last_fetch.txt")
@@ -182,12 +182,12 @@ def main():
 
     # timestamp every ship caught in this run with receipt time, rather than
     # trying to parse aisstream's own reported time_utc string -- receipt
-    # lag is seconds, negligible against the 15-minute trail this feeds
+    # lag is seconds, negligible against the trail this feeds
     now = dt.datetime.now(dt.timezone.utc)
     stamp = now.isoformat()
     _record_fetch_time(now)   # recorded even on a connection failure (ships
                                # empty) -- a broken key/network won't retry
-                               # more often than the same 15-min cadence
+                               # more often than MIN_FETCH_INTERVAL_MINUTES
 
     history = _load_history()
     for mmsi, ship in ships.items():
