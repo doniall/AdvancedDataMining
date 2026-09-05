@@ -171,11 +171,24 @@ def load_ship_history():
         return json.load(f)
 
 
-def _nearest_sample(samples, target):
-    """The sample whose timestamp is closest to `target` (before or after)."""
-    if not samples:
+def _sample_at_or_before(samples, target):
+    """The latest sample at or before `target`, or None if the ship has no
+    samples that old yet. Deliberately NOT "whichever sample is closest" --
+    that flips between two samples right at their midpoint, so on a
+    sequence of frames a few minutes apart (Met Eireann's own 5-min radar
+    cadence, much tighter than AIS's ~15-20 min sample spacing) a ship's
+    position and trail would jump discontinuously mid-sequence purely
+    because a later sample became slightly nearer than an earlier one, with
+    nothing in the actual ship movement to justify it. Picking "latest at
+    or before" instead is monotonic as at_time advances through a frame
+    sequence: a ship holds its position, then steps forward exactly once
+    when new data becomes available, and never regresses to an older
+    sample or jumps ahead into what is, relative to that frame, the
+    future."""
+    candidates = [s for s in samples if dt.datetime.fromisoformat(s["t"]) <= target]
+    if not candidates:
         return None
-    return min(samples, key=lambda s: abs((dt.datetime.fromisoformat(s["t"]) - target).total_seconds()))
+    return max(candidates, key=lambda s: s["t"])
 
 
 def ships_at(history, at_time):
@@ -187,11 +200,11 @@ def ships_at(history, at_time):
     one of them."""
     out = []
     for samples in history.values():
-        now_s = _nearest_sample(samples, at_time)
+        now_s = _sample_at_or_before(samples, at_time)
         if now_s is None:
             continue
         now_t = dt.datetime.fromisoformat(now_s["t"])
-        if abs((now_t - at_time).total_seconds()) / 60 > SHIP_MAX_AGE_MINUTES:
+        if (at_time - now_t).total_seconds() / 60 > SHIP_MAX_AGE_MINUTES:
             continue
 
         window_start = now_t - dt.timedelta(minutes=SHIP_TRAIL_WINDOW_MINUTES)
