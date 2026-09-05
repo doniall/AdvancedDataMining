@@ -95,7 +95,14 @@ def fetch_frame(src, token):
             if status != 200 or not data:
                 print(f"    missing tile {tx},{ty} for {src} (status {status})")
                 return None
-            tile = Image.open(io.BytesIO(data)).convert("RGB")
+            try:
+                tile = Image.open(io.BytesIO(data)).convert("RGB")
+            except Exception as e:
+                # a 200 status doesn't guarantee a valid image -- a rate-limit
+                # page or truncated response would otherwise crash the whole
+                # run here and abandon every frame still left to fetch
+                print(f"    bad tile {tx},{ty} for {src} ({e})")
+                return None
             mosaic.paste(tile, ((tx - TILE_X0) * TILE_SIZE, (ty - TILE_Y0) * TILE_SIZE))
     return mosaic
 
@@ -107,7 +114,11 @@ def report(filename, frame):
         print(f"FAILED  {frame.get('toolTipDate', frame['src'])}")
         return
     path = os.path.join(RadarImageSubfolder, filename)
-    img.save(path)
+    try:
+        img.save(path)
+    except OSError as e:
+        print(f"FAILED  {frame.get('toolTipDate', frame['src'])} (could not save: {e})")
+        return
     print(f"LIVE  {frame.get('toolTipDate', frame['src'])}")
     print(f"      saved as {filename}  {img.size[0]}x{img.size[1]} px, mode {img.mode}")
     print()
