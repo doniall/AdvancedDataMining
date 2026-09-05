@@ -520,7 +520,7 @@ def main():
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
     ship_history = load_ship_history()
-    print(f"test")
+    
     for imgpath in png_files:
         print(f"{imgpath}")
         src = Image.open(f"{RadarImageSubfolder}/{imgpath}").convert("RGB") if imgpath else fetch_latest()

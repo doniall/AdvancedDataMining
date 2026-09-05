@@ -4,15 +4,18 @@ import D_ship_ais
 
 #A_met_radar_probe
 
+print("Gathering Met Éireann's rainfall radar snapshots")
 A_met_radar_probe.main()
 
+
+print("Gathering AIS data for ship positions")
 try:
     D_ship_ais.main()
 except Exception as e:
     print(f"ship position fetch failed ({e}); rendering without ship markers")
 
-print("hello")
+print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"
 B_ireland_radar_greyscale.main()
 
-print("goodbye")
+print("Goodbye!")
