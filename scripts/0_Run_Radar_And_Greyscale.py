@@ -1,6 +1,6 @@
 import A_met_radar_probe
 import B_ireland_radar_greyscale
-import D_ship_ais
+import E_fetch_ship_history
 
 #A_met_radar_probe
 
@@ -11,11 +11,11 @@ except Exception as e:
     print(f"Met Éireann radar fetch failed ({e})")
 
 
-print("Gathering AIS data for ship positions")
+print("Fetching AIS ship history from the Azure VM")
 try:
-    D_ship_ais.main()
+    E_fetch_ship_history.main()
 except Exception as e:
-    print(f"ship position fetch failed ({e}); rendering without ship markers")
+    print(f"ship history fetch failed ({e}); rendering with whatever's already on disk")
 
 print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"
