@@ -91,6 +91,14 @@ RAMP = np.array([
 BACKGROUND_RGB       = np.array([71, 112, 76], float)
 BACKGROUND_TOLERANCE = 30
 
+# some tiles (seen at the NE edge of the fetched grid, likely a different
+# upstream source stitched into the same mosaic) render their own
+# dry-but-in-range background as near-black instead of the olive above --
+# same meaning (radar coverage, no rain), just a different colour
+# convention. RAMP's darkest rain colour still has a max channel of 190,
+# comfortably clear of this, so it can't swallow real heavy rain.
+BLACK_BACKGROUND_TOLERANCE = 40
+
 GREY = {i+1: v for i, v in enumerate(
     [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
 
@@ -223,13 +231,15 @@ def ships_at(history, at_time):
     return out
 
 def is_background(r, g, b):
-    """True where a pixel matches Met Eireann's dry-but-in-range olive,
-    within BACKGROUND_TOLERANCE RGB units. The one place this exact colour
-    is defined -- classify() excludes it from rain matching, in_range_mask()
-    uses the same test to positively identify it, so the two can't disagree."""
-    dd = ((r - BACKGROUND_RGB[0]) ** 2 + (g - BACKGROUND_RGB[1]) ** 2
-          + (b - BACKGROUND_RGB[2]) ** 2)
-    return dd < BACKGROUND_TOLERANCE ** 2
+    """True where a pixel matches Met Eireann's dry-but-in-range olive, or
+    the near-black variant some tiles use for the same thing, within their
+    respective tolerances. The one place either colour is defined --
+    classify() excludes them from rain matching, in_range_mask() uses the
+    same test to positively identify them, so the two can't disagree."""
+    olive = ((r - BACKGROUND_RGB[0]) ** 2 + (g - BACKGROUND_RGB[1]) ** 2
+             + (b - BACKGROUND_RGB[2]) ** 2) < BACKGROUND_TOLERANCE ** 2
+    black = (r ** 2 + g ** 2 + b ** 2) < BLACK_BACKGROUND_TOLERANCE ** 2
+    return olive | black
 
 
 def classify(r, g, b):
