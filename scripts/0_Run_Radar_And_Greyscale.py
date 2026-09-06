@@ -1,6 +1,7 @@
 import A_met_radar_probe
 import B_ireland_radar_greyscale
 import E_fetch_ship_history
+import F_ensure_vm_running
 
 #A_met_radar_probe
 
@@ -10,6 +11,12 @@ try:
 except Exception as e:
     print(f"Met Éireann radar fetch failed ({e})")
 
+
+print("Checking the AIS VM is running")
+try:
+    F_ensure_vm_running.main()
+except Exception as e:
+    print(f"VM power check failed ({e})")
 
 print("Fetching AIS ship history from the Azure VM")
 try:
