@@ -284,7 +284,12 @@ def main():
         return
 
     try:
-        station_id = STATION_ID or discover_station_id()
+        if STATION_ID:
+            station_id = STATION_ID
+            print(f"using station id {station_id!r} (from SOLIS_STATION_ID)")
+        else:
+            station_id = discover_station_id()
+            print(f"using station id {station_id!r} (discovered via userStationList)")
         data = fetch_station_detail(station_id)
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError, KeyError) as e:
         print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place")
