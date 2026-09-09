@@ -2,11 +2,19 @@
 """
 G_solis_fetch.py
 
-Pulls key numbers from your SolisCloud account (current PV output, today's
-generation, lifetime generation) and writes them to solis_status.json, so
-B_ireland_radar_greyscale.py can draw them onto the e-ink image alongside
-the radar. If solis_status.json doesn't exist yet, the solar block is just
-skipped -- same "optional" pattern as ship_history.json.
+Pulls key numbers from your SolisCloud account and writes them to
+solis_status.json, so B_ireland_radar_greyscale.py can draw a stats strip
+alongside the radar. If solis_status.json doesn't exist yet, the strip
+just shows placeholders -- same "optional" pattern as ship_history.json.
+
+Metrics fetched (all best-effort -- see NOTE ON FIELD NAMES):
+    - PV power right now (kW)
+    - household consumption right now (kW)
+    - grid import/export right now (kW, signed)
+    - battery state of charge (%)
+    - today's production and consumption (kWh)
+    - yesterday's production and consumption (kWh)
+    - lifetime production (kWh)
 
 SETUP
     1. Log into https://www.soliscloud.com, then Service Management ->
@@ -26,13 +34,30 @@ Needs: nothing beyond the standard library.
 
 NOTE ON FIELD NAMES
     SolisCloud's stationDetail response isn't consistently documented, and
-    different accounts/regions have been seen to disagree on the exact key
-    for the same number (e.g. "dayEnergy" vs "energyToday"). Rather than
-    hard-code one guess and silently show nothing (or crash) if it's wrong,
-    this script tries a short list of known candidate keys for each metric
-    and keeps the full raw response in solis_status.json under "raw" --
-    open that file after your first real run to confirm the right keys got
-    picked, and add to the candidate lists below if not.
+    different accounts/API versions have been seen to disagree on the
+    exact key for the same number -- e.g. one real captured stationDetail
+    response used "eToday" for today's generation, while Solis's own bug
+    tracker says "dayEnergy" is the one that doesn't reset early. "power"
+    is the plant's rated capacity in kWp, NOT live output -- "pac" is.
+    Rather than hard-code one guess and silently show nothing (or the
+    wrong number) if it's wrong, this script tries a short list of known
+    candidate keys per metric and keeps the full raw response in
+    solis_status.json under "raw" -- open that file after your first real
+    run to confirm the right keys got picked, and add to the candidate
+    lists below if not.
+
+    "Yesterday" isn't in stationDetail at all in the captures seen -- this
+    script first tries a couple of direct candidate keys in case your
+    account has them, then falls back to querying the stationDay
+    time-series endpoint for yesterday's date and taking the day's final
+    (highest) cumulative reading. If that turns out to be interval deltas
+    rather than a running total on your account, flip DAY_ENERGY_IS_CUMULATIVE
+    below to sum them instead.
+
+    Grid import/export sign: "psum" was seen positive = exporting to the
+    grid. If your account reports the opposite, flip GRID_POSITIVE_MEANS_EXPORT
+    in B_ireland_radar_greyscale.py (that's where the sign turns into an
+    Import/Export label, not here).
 """
 
 import base64
@@ -45,41 +70,80 @@ import time
 import urllib.error
 import urllib.request
 from email.utils import formatdate
+from zoneinfo import ZoneInfo
 
 KEY_ID = os.environ.get("SOLIS_KEY_ID", "")
 KEY_SECRET = os.environ.get("SOLIS_KEY_SECRET", "")
 STATION_ID = os.environ.get("SOLIS_STATION_ID", "")
+MONEY_CODE = os.environ.get("SOLIS_MONEY_CODE", "EUR")   # required by stationDay, doesn't affect energy values
+LOCAL_TZ = ZoneInfo("Europe/Dublin")                      # matches B_ireland_radar_greyscale.py's own local day boundary
 
 DOMAIN = "https://www.soliscloud.com:13333"
 USER_STATION_LIST_PATH = "/v1/api/userStationList"
 STATION_DETAIL_PATH = "/v1/api/stationDetail"
+STATION_DAY_PATH = "/v1/api/stationDay"
 
 # don't hit the API more often than this -- SolisCloud enforces its own
 # rate limits, and inverter output doesn't change fast enough to need a
 # fresh pull every time 0_Run_Radar_And_Greyscale.py fires
 MIN_FETCH_INTERVAL_MINUTES = 5
 
+# see "Yesterday" note above
+DAY_ENERGY_IS_CUMULATIVE = True
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
 LAST_FETCH_PATH = os.path.join(HERE, "solis_last_fetch.txt")
 
 # (value key, unit key) candidates, tried in order, for each metric --
-# see NOTE ON FIELD NAMES above
-POWER_CANDIDATES = [
-    ("power", "powerUnit"),
+# see NOTE ON FIELD NAMES above. "power" deliberately excluded from
+# POWER_NOW_CANDIDATES -- confirmed to be rated capacity, not live output.
+POWER_NOW_CANDIDATES = [
     ("pac", "pacUnit"),
     ("acPower", "acPowerUnit"),
 ]
-TODAY_ENERGY_CANDIDATES = [
+CONSUMPTION_NOW_CANDIDATES = [
+    ("familyLoadPower", "familyLoadPowerUnit"),
+    ("homeLoadPower", "homeLoadPowerUnit"),
+    ("loadPower", "loadPowerUnit"),
+]
+GRID_NOW_CANDIDATES = [
+    ("psum", "psumUnit"),
+    ("gridPower", "gridPowerUnit"),
+]
+BATTERY_SOC_CANDIDATES = [
+    ("batteryCapacitySoc", None),
+    ("batteryPercent", None),
+    ("remainingCapacity", None),
+]
+TODAY_PRODUCTION_CANDIDATES = [
     ("dayEnergy", "dayEnergyUnit"),
+    ("eToday", "eTodayUnit"),
     ("energyToday", "energyTodayUnit"),
-    ("todayEnergy", "todayEnergyUnit"),
+]
+TODAY_CONSUMPTION_CANDIDATES = [
+    ("homeLoadTodayEnergy", "homeLoadTodayEnergyUnit"),
+    ("consumeTodayEnergy", "consumeTodayEnergyUnit"),
+]
+YESTERDAY_PRODUCTION_CANDIDATES = [
+    ("eYesterday", "eYesterdayUnit"),
+    ("yesterdayEnergy", "yesterdayEnergyUnit"),
+    ("dayEnergyLastDay", "dayEnergyLastDayUnit"),
+]
+YESTERDAY_CONSUMPTION_CANDIDATES = [
+    ("homeLoadYesterdayEnergy", "homeLoadYesterdayEnergyUnit"),
+    ("consumeYesterdayEnergy", "consumeYesterdayEnergyUnit"),
 ]
 TOTAL_ENERGY_CANDIDATES = [
     ("allEnergy", "allEnergyUnit"),
+    ("eTotal", "eTotalUnit"),
     ("energyTotalLife", "energyTotalLifeUnit"),
     ("totalEnergy", "totalEnergyUnit"),
 ]
+
+# stationDay time-series record field candidates for the yesterday fallback
+DAY_RECORD_PRODUCE_CANDIDATES = ["produceEnergy", "energy", "eToday"]
+DAY_RECORD_CONSUME_CANDIDATES = ["consumeEnergy", "useEnergy", "homeLoadEnergy"]
 
 
 def _sign_and_post(path, payload):
@@ -139,6 +203,26 @@ def fetch_station_detail(station_id):
     return data
 
 
+def fetch_day_totals(station_id, date_str):
+    """Best-effort fallback for a specific past date's production/consumption,
+    via the stationDay time-series endpoint -- see "Yesterday" note above."""
+    resp = _sign_and_post(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
+    if str(resp.get("code")) not in ("0", "0000"):
+        return None, None
+    records = resp.get("data")
+    if not isinstance(records, list) or not records:
+        return None, None
+
+    def _series(candidates):
+        for key in candidates:
+            values = [float(r[key]) for r in records if isinstance(r, dict) and r.get(key) is not None]
+            if values:
+                return max(values) if DAY_ENERGY_IS_CUMULATIVE else sum(values)
+        return None
+
+    return _series(DAY_RECORD_PRODUCE_CANDIDATES), _series(DAY_RECORD_CONSUME_CANDIDATES)
+
+
 def _pick(data, candidates):
     for value_key, unit_key in candidates:
         if value_key in data and data[value_key] is not None:
@@ -146,7 +230,7 @@ def _pick(data, candidates):
                 value = float(data[value_key])
             except (TypeError, ValueError):
                 continue
-            return value, data.get(unit_key)
+            return value, (data.get(unit_key) if unit_key else None)
     return None, None
 
 
@@ -174,9 +258,27 @@ def main():
         print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place")
         return
 
-    power_kw, power_unit = _pick(data, POWER_CANDIDATES)
-    today_kwh, today_unit = _pick(data, TODAY_ENERGY_CANDIDATES)
+    power_kw, power_unit = _pick(data, POWER_NOW_CANDIDATES)
+    consumption_kw, consumption_unit = _pick(data, CONSUMPTION_NOW_CANDIDATES)
+    grid_kw, grid_unit = _pick(data, GRID_NOW_CANDIDATES)
+    battery_pct, _ = _pick(data, BATTERY_SOC_CANDIDATES)
+    today_kwh, today_unit = _pick(data, TODAY_PRODUCTION_CANDIDATES)
+    today_consumption_kwh, today_consumption_unit = _pick(data, TODAY_CONSUMPTION_CANDIDATES)
+    yesterday_kwh, _ = _pick(data, YESTERDAY_PRODUCTION_CANDIDATES)
+    yesterday_consumption_kwh, _ = _pick(data, YESTERDAY_CONSUMPTION_CANDIDATES)
     total_kwh, total_unit = _pick(data, TOTAL_ENERGY_CANDIDATES)
+
+    if yesterday_kwh is None or yesterday_consumption_kwh is None:
+        yesterday_date = (dt.datetime.now(LOCAL_TZ).date() - dt.timedelta(days=1)).isoformat()
+        try:
+            day_produce, day_consume = fetch_day_totals(station_id, yesterday_date)
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
+            print(f"stationDay fallback for yesterday's totals failed ({e})")
+            day_produce, day_consume = None, None
+        if yesterday_kwh is None:
+            yesterday_kwh = day_produce
+        if yesterday_consumption_kwh is None:
+            yesterday_consumption_kwh = day_consume
 
     if power_kw is None and today_kwh is None:
         known = ", ".join(sorted(data.keys()))
@@ -189,8 +291,17 @@ def main():
         "station_id": station_id,
         "power_kw": power_kw,
         "power_unit": power_unit,
+        "consumption_kw": consumption_kw,
+        "consumption_unit": consumption_unit,
+        "grid_kw": grid_kw,
+        "grid_unit": grid_unit,
+        "battery_pct": battery_pct,
         "today_kwh": today_kwh,
         "today_unit": today_unit,
+        "today_consumption_kwh": today_consumption_kwh,
+        "today_consumption_unit": today_consumption_unit,
+        "yesterday_kwh": yesterday_kwh,
+        "yesterday_consumption_kwh": yesterday_consumption_kwh,
         "total_kwh": total_kwh,
         "total_unit": total_unit,
         "raw": data,
@@ -201,7 +312,7 @@ def main():
     with open(LAST_FETCH_PATH, "w") as f:
         f.write(status["fetched_at"])
 
-    print(f"SolisCloud: {power_kw} {power_unit or 'kW'} now, {today_kwh} {today_unit or 'kWh'} today")
+    print(f"SolisCloud: {power_kw} kW now, {today_kwh} kWh today, battery {battery_pct}%")
 
 
 if __name__ == "__main__":

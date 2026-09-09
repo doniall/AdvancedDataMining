@@ -44,6 +44,12 @@ LOCATION_LAT = 53.3498      # your home latitude   (default: Dublin)
 LOCATION_LON = -6.2603      # your home longitude
 VIEW         = "portrait"   # "portrait"  = Ireland fills the frame (Atlantic margin)
                             # "landscape" = full Met Eireann extent, out to Wales
+
+SHOW_SOLIS_STRIP = True     # reserve a vertical strip for SolisCloud stats,
+                            # carved out of the map's own width rather than
+                            # added on top of the fixed device resolution
+SOLIS_STRIP_WIDTH = 320     # px, taken off the right edge of the canvas
+GRID_POSITIVE_MEANS_EXPORT = True   # flip if your account's grid power sign is reversed -- see G_solis_fetch.py
 # ======================================================
 
 # --- tile-grid projection (exact; derived from A_met_radar_probe's tile grid) ---
@@ -483,10 +489,19 @@ def fill_black(A, thresh=95, max_iter=16):
         known |= newly; kn = known.astype(np.float32); out[~known] = 0.0
     return np.clip(out, 0, 255)
 
+def canvas_size():
+    """Full physical device resolution for the chosen VIEW -- independent of
+    how much of that width the map itself gets, see build_window()."""
+    return (1872, 1404) if VIEW == "landscape" else (1404, 1872)
+
+
 def build_window():
-    """Return canvas size and the mercator view window for the chosen VIEW."""
+    """Return the MAP's pixel size (device canvas minus the Solis strip, if
+    enabled) and the mercator view window for the chosen VIEW."""
     if VIEW == "landscape":
-        W, H = 1872, 1404
+        W, H = canvas_size()
+        if SHOW_SOLIS_STRIP:
+            W -= SOLIS_STRIP_WIDTH
         lon_l = math.degrees((0 - BX) / S)
         lon_r = math.degrees((IMG_W - BX) / S)
         Xmn, Xmx = math.radians(lon_l), math.radians(lon_r)
@@ -497,7 +512,9 @@ def build_window():
         Wwin = Xmx - Xmn
         Hwin = Wwin / (W / H)                 # crop N/S to fill the landscape frame
     else:  # portrait: Ireland fills the frame, shifted west for the Atlantic approach
-        W, H = 1404, 1872
+        W, H = canvas_size()
+        if SHOW_SOLIS_STRIP:
+            W -= SOLIS_STRIP_WIDTH
         mnlon, mnlat, mxlon, mxlat = IRELAND_BOUNDS
         Xmn, Xmx = math.radians(mnlon), math.radians(mxlon)
         Ymn, Ymx = float(mercY(mnlat)), float(mercY(mxlat))
@@ -532,6 +549,66 @@ def build_window():
     Wwin, Hwin = 2 * hw, 2 * hh
 
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
+
+
+def _fmt_stat(value, unit, decimals=2):
+    return f"{value:.{decimals}f} {unit}" if value is not None else f"-- {unit}"
+
+
+def _draw_solis_strip(d, x0, x1, H, solis):
+    """Vertical stats sidebar in the reserved strip [x0, x1) -- always drawn
+    (with placeholders if solis is None/incomplete) so the map's width
+    doesn't jump around between frames depending on whether a fetch
+    succeeded."""
+    solis = solis or {}
+    pad = 20
+    x = x0 + pad
+    y = 16
+
+    d.line([(x0, 0), (x0, H)], fill=COUNTY_LINE, width=1)
+
+    header_font = _load_font(20)
+    label_font = _load_font(15)
+    value_font = _load_font(30)
+    sub_font = _load_font(19)
+
+    d.text((x, y), "SOLIS SOLAR", fill=COAST_LINE, font=header_font)
+    y += 42
+
+    def stat(label, value_str, y):
+        d.text((x, y), label, fill=COAST_LINE, font=label_font)
+        d.text((x, y + 19), value_str, fill=COAST_LINE, font=value_font)
+        return y + 72
+
+    y = stat("PV PRODUCTION NOW", _fmt_stat(solis.get("power_kw"), "kW"), y)
+    y = stat("CONSUMPTION NOW", _fmt_stat(solis.get("consumption_kw"), "kW"), y)
+
+    grid_kw = solis.get("grid_kw")
+    if grid_kw is None:
+        grid_label, grid_str = "GRID NOW", "--"
+    else:
+        exporting = (grid_kw >= 0) == GRID_POSITIVE_MEANS_EXPORT
+        grid_label = "EXPORTING TO GRID" if exporting else "IMPORTING FROM GRID"
+        grid_str = f"{abs(grid_kw):.2f} kW"
+    y = stat(grid_label, grid_str, y)
+
+    battery_pct = solis.get("battery_pct")
+    y = stat("BATTERY", f"{battery_pct:.0f} %" if battery_pct is not None else "-- %", y)
+
+    y += 14
+    d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
+    y += 20
+
+    def day_pair(title, prod, cons, y):
+        d.text((x, y), title, fill=COAST_LINE, font=label_font)
+        y += 22
+        d.text((x, y), f"Produced  {_fmt_stat(prod, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
+        y += 25
+        d.text((x, y), f"Used      {_fmt_stat(cons, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
+        return y + 38
+
+    y = day_pair("TODAY", solis.get("today_kwh"), solis.get("today_consumption_kwh"), y)
+    day_pair("YESTERDAY", solis.get("yesterday_kwh"), solis.get("yesterday_consumption_kwh"), y)
 
 
 def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
@@ -617,17 +694,17 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
         d.text((16, 12), "Met Éireann", fill=COAST_LINE, font=label_font)
         d.text((16, 34), frame_time.strftime("%d/%m/%Y, %H:%M"), fill=COAST_LINE, font=time_font)
 
-    power_kw = solis.get("power_kw") if solis else None
-    today_kwh = solis.get("today_kwh") if solis else None
-    if power_kw is not None or today_kwh is not None:
-        label_font = _load_font(18)
-        time_font = _load_font(30)
-        right_x = img.width - 16
-        d.text((right_x, 12), "Solis Solar", fill=COAST_LINE, font=label_font, anchor="ra")
-        power_str = f"{power_kw:.2f} kW now" if power_kw is not None else "-- kW now"
-        today_str = f"{today_kwh:.1f} kWh today" if today_kwh is not None else "-- kWh today"
-        d.text((right_x, 34), power_str, fill=COAST_LINE, font=time_font, anchor="ra")
-        d.text((right_x, 64), today_str, fill=COAST_LINE, font=label_font, anchor="ra")
+    if SHOW_SOLIS_STRIP:
+        # the map itself is fully drawn and clipped to its own (narrower) W x H
+        # above -- only now does it get pasted onto the full device canvas,
+        # so a coastline/ship line that would otherwise run past the map's own
+        # edge can never bleed into the strip
+        full_w, full_h = canvas_size()
+        canvas = Image.new("L", (full_w, full_h), BACKGROUND)
+        canvas.paste(img, (0, 0))
+        img = canvas
+        d = ImageDraw.Draw(img)
+        _draw_solis_strip(d, W, full_w, H, solis)
 
     return img
 
