@@ -108,14 +108,19 @@ STATUS_PATH = os.path.join(HERE, "solis_status.json")
 LAST_FETCH_PATH = os.path.join(HERE, "solis_last_fetch.txt")
 
 # (value key, unit key) candidates, tried in order, for each metric --
-# see NOTE ON FIELD NAMES above. "power" deliberately excluded from
-# POWER_NOW_CANDIDATES -- confirmed to be rated capacity, not live output.
+# see NOTE ON FIELD NAMES above. Confirmed against a real stationDetail
+# capture: "power" is live output (kW), distinct from the separate
+# "capacity" field (rated kWp) -- an earlier assumption that "power" meant
+# capacity, based on a second-hand discussion summary, turned out wrong (or
+# at least not universal). "pac"/"acPower" kept as fallbacks in case some
+# accounts use those instead.
 POWER_NOW_CANDIDATES = [
+    ("power", "powerStr"),
     ("pac", "pacUnit"),
     ("acPower", "acPowerUnit"),
 ]
 CONSUMPTION_NOW_CANDIDATES = [
-    ("familyLoadPower", "familyLoadPowerUnit"),
+    ("familyLoadPower", "familyLoadPowerStr"),   # confirmed against a real capture -- unit key is *Str, not *Unit
     ("homeLoadPower", "homeLoadPowerUnit"),
     ("loadPower", "loadPowerUnit"),
 ]
