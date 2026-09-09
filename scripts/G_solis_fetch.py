@@ -125,7 +125,9 @@ CONSUMPTION_NOW_CANDIDATES = [
     ("loadPower", "loadPowerUnit"),
 ]
 GRID_NOW_CANDIDATES = [
-    ("psum", "psumUnit"),
+    ("psum", "psumStr"),   # unit key confirmed *Str not *Unit, same pattern as power/familyLoadPower.
+                            # Sign confirmed positive=export by energy balance on a real account:
+                            # power - familyLoadPower - batteryPower == psum
     ("gridPower", "gridPowerUnit"),
 ]
 BATTERY_SOC_CANDIDATES = [
