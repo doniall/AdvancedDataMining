@@ -23,14 +23,26 @@ SETUP
     2. Set SOLIS_KEY_ID and SOLIS_KEY_SECRET as environment variables.
        Treat the secret like the AIS API key / VM client secret elsewhere
        in this repo -- don't commit it, don't paste it into chat.
-    3. Optional: set SOLIS_STATION_ID to the numeric station ID shown in
-       the SolisCloud portal URL when you open your plant. If you leave it
-       unset, this script asks userStationList for your first station and
-       uses that -- fine for a single-site account, but pin it explicitly
-       if you ever have more than one.
+    3. Set SOLIS_STATION_ID to the numeric station ID shown in the
+       SolisCloud portal URL when you open your plant (also printed by this
+       script on a successful run, or found by searching solis_status.json's
+       "raw" section for a matching "id"). If you leave it unset, this
+       script asks userStationList for your first station and uses that --
+       fine for a single-site account, but every run then pays for an extra
+       API round-trip to re-discover an ID that never changes, so set it
+       once you know it.
 
 Run:   python3 G_solis_fetch.py
 Needs: nothing beyond the standard library.
+
+RETRIES AND BACKOFF
+    A failed request is retried once immediately (REQUEST_RETRIES). If
+    SolisCloud keeps failing across separate runs of this script (e.g. it's
+    called every few minutes from 0_Run_Radar_And_Greyscale.py), the wait
+    before trying again grows via BACKOFF_SCHEDULE_MINUTES instead of
+    hammering an unhealthy backend on every cycle -- state for this lives in
+    solis_fetch_state.json, separate from solis_status.json (which only
+    updates on success, so the display always shows the last real data).
 
 NOTE ON FIELD NAMES
     SolisCloud's stationDetail response isn't consistently documented, and
@@ -83,20 +95,34 @@ USER_STATION_LIST_PATH = "/v1/api/userStationList"
 STATION_DETAIL_PATH = "/v1/api/stationDetail"
 STATION_DAY_PATH = "/v1/api/stationDay"
 
-# don't hit the API more often than this -- SolisCloud enforces its own
-# rate limits, and inverter output doesn't change fast enough to need a
-# fresh pull every time 0_Run_Radar_And_Greyscale.py fires
+# don't hit the API more often than this when things are healthy --
+# SolisCloud enforces its own rate limits, and inverter output doesn't
+# change fast enough to need a fresh pull every time
+# 0_Run_Radar_And_Greyscale.py fires. See BACKOFF_SCHEDULE_MINUTES below for
+# what happens when it's NOT healthy.
 MIN_FETCH_INTERVAL_MINUTES = 5
+
+# after N consecutive failed attempts (network timeout, 502, or Solis's own
+# "try again later"), wait this many minutes before trying again, instead of
+# the normal MIN_FETCH_INTERVAL_MINUTES -- during a sustained outage every
+# attempt still costs up to REQUEST_TIMEOUT_SECONDS * (REQUEST_RETRIES + 1),
+# and without this a pipeline firing every few minutes would eat that cost
+# on every single cycle for as long as Solis stays down. Index = consecutive
+# failures so far, clamped to the last entry.
+BACKOFF_SCHEDULE_MINUTES = [5, 10, 20, 40, 60]
 
 # SolisCloud's authenticated endpoints (stationDetail/inverterDetail
 # especially) are reported elsewhere as slow or intermittently flaky under
 # load, independent of your own network -- confirmed here by curl getting
 # an instant reply for an unsigned request (rejected before touching the
-# backend) while a properly-signed stationDetail call hung past the old
-# 20s timeout. One retry after a real timeout, or after Solis's own
-# "Communication error ... try again later" response, covers that without
-# hammering the API on a hard failure (bad signature, unknown station id).
-REQUEST_TIMEOUT_SECONDS = 30
+# backend) while a properly-signed stationDetail call hung or 502'd.
+# Every failure seen so far has been either an instant error (502, app-level
+# "try again") or a full hang to the timeout -- no case yet of a slow-but-
+# real response arriving late, so a shorter timeout mainly cuts wasted wait
+# on hangs rather than risking a real response getting cut off. One retry
+# covers a lone blip within a single run; BACKOFF_SCHEDULE_MINUTES above
+# covers a sustained outage across runs.
+REQUEST_TIMEOUT_SECONDS = 15
 REQUEST_RETRIES = 1
 REQUEST_RETRY_DELAY_SECONDS = 5
 
@@ -105,7 +131,7 @@ DAY_ENERGY_IS_CUMULATIVE = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
-LAST_FETCH_PATH = os.path.join(HERE, "solis_last_fetch.txt")
+STATE_PATH = os.path.join(HERE, "solis_fetch_state.json")   # last attempt time + consecutive failures, see BACKOFF_SCHEDULE_MINUTES
 
 # (value key, unit key) candidates, tried in order, for each metric --
 # see NOTE ON FIELD NAMES above. Confirmed against a real stationDetail
@@ -273,11 +299,34 @@ def _pick(data, candidates):
     return None, None
 
 
-def _due():
-    if not os.path.exists(LAST_FETCH_PATH):
+def _load_state():
+    if not os.path.exists(STATE_PATH):
+        return {"last_attempt_at": None, "consecutive_failures": 0}
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"last_attempt_at": None, "consecutive_failures": 0}
+
+
+def _save_state(state):
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f)
+
+
+def _wait_minutes_for(consecutive_failures):
+    if not consecutive_failures:
+        return MIN_FETCH_INTERVAL_MINUTES
+    return BACKOFF_SCHEDULE_MINUTES[min(consecutive_failures, len(BACKOFF_SCHEDULE_MINUTES)) - 1]
+
+
+def _due(state):
+    if not state.get("last_attempt_at"):
         return True
-    age_minutes = (time.time() - os.path.getmtime(LAST_FETCH_PATH)) / 60
-    return age_minutes >= MIN_FETCH_INTERVAL_MINUTES
+    wait_minutes = _wait_minutes_for(state.get("consecutive_failures", 0))
+    last_attempt = dt.datetime.fromisoformat(state["last_attempt_at"])
+    age_minutes = (dt.datetime.now(dt.timezone.utc) - last_attempt).total_seconds() / 60
+    return age_minutes >= wait_minutes
 
 
 def main():
@@ -286,9 +335,14 @@ def main():
               "(see the setup notes at the top of this file)")
         return
 
-    if not _due():
-        print(f"last SolisCloud fetch was under {MIN_FETCH_INTERVAL_MINUTES} min ago -- skipping")
+    state = _load_state()
+    if not _due(state):
+        wait_minutes = _wait_minutes_for(state.get("consecutive_failures", 0))
+        print(f"last SolisCloud attempt was under {wait_minutes} min ago "
+              f"(consecutive failures: {state.get('consecutive_failures', 0)}) -- skipping")
         return
+
+    state["last_attempt_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
     try:
         if STATION_ID:
@@ -299,7 +353,11 @@ def main():
             print(f"using station id {station_id!r} (discovered via userStationList)")
         data = fetch_station_detail(station_id)
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError, KeyError) as e:
-        print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place")
+        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+        _save_state(state)
+        next_wait = _wait_minutes_for(state["consecutive_failures"])
+        print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place "
+              f"(consecutive failures: {state['consecutive_failures']}, next attempt in {next_wait} min)")
         return
 
     power_kw, power_unit = _pick(data, POWER_NOW_CANDIDATES)
@@ -353,8 +411,9 @@ def main():
 
     with open(STATUS_PATH, "w") as f:
         json.dump(status, f, indent=2)
-    with open(LAST_FETCH_PATH, "w") as f:
-        f.write(status["fetched_at"])
+
+    state["consecutive_failures"] = 0
+    _save_state(state)
 
     print(f"SolisCloud: {power_kw} kW now, {today_kwh} kWh today, battery {battery_pct}%")
 
