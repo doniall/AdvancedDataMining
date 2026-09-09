@@ -12,8 +12,8 @@ Metrics fetched (all best-effort -- see NOTE ON FIELD NAMES):
     - household consumption right now (kW)
     - grid import/export right now (kW, signed)
     - battery state of charge (%)
-    - today's production and consumption (kWh)
-    - yesterday's production and consumption (kWh)
+    - today's production, consumption, and grid export (kWh)
+    - yesterday's production, consumption, and grid export (kWh)
     - lifetime production (kWh)
 
 SETUP
@@ -170,6 +170,11 @@ TODAY_CONSUMPTION_CANDIDATES = [
     ("homeLoadTodayEnergy", "homeLoadTodayEnergyUnit"),
     ("consumeTodayEnergy", "consumeTodayEnergyUnit"),
 ]
+TODAY_GRID_EXPORT_CANDIDATES = [
+    ("gridSellDayEnergy", "gridSellDayEnergyStr"),   # confirmed against a real capture
+    ("gridSellEnergy", "gridSellEnergyStr"),
+    ("gridSellTodayEnergy", "gridSellTodayEnergyUnit"),
+]
 YESTERDAY_PRODUCTION_CANDIDATES = [
     ("eYesterday", "eYesterdayUnit"),
     ("yesterdayEnergy", "yesterdayEnergyUnit"),
@@ -178,6 +183,11 @@ YESTERDAY_PRODUCTION_CANDIDATES = [
 YESTERDAY_CONSUMPTION_CANDIDATES = [
     ("homeLoadYesterdayEnergy", "homeLoadYesterdayEnergyUnit"),
     ("consumeYesterdayEnergy", "consumeYesterdayEnergyUnit"),
+]
+YESTERDAY_GRID_EXPORT_CANDIDATES = [
+    ("gridSellYesterdayEnergy", "gridSellYesterdayEnergyStr"),   # reported elsewhere, unconfirmed on this account
+                                                                   # (not present in this account's own stationDetail
+                                                                   # capture -- falls back to stationDay if absent)
 ]
 TOTAL_ENERGY_CANDIDATES = [
     ("allEnergy", "allEnergyUnit"),
@@ -189,6 +199,7 @@ TOTAL_ENERGY_CANDIDATES = [
 # stationDay time-series record field candidates for the yesterday fallback
 DAY_RECORD_PRODUCE_CANDIDATES = ["produceEnergy", "energy", "eToday"]
 DAY_RECORD_CONSUME_CANDIDATES = ["consumeEnergy", "useEnergy", "homeLoadEnergy"]
+DAY_RECORD_GRID_EXPORT_CANDIDATES = ["gridSellEnergy", "sellEnergy", "onGridEnergy"]
 
 
 def _sign_and_post(path, payload):
@@ -264,19 +275,21 @@ def fetch_station_detail(station_id):
 
 
 def fetch_day_totals(station_id, date_str):
-    """Best-effort fallback for a specific past date's production/consumption,
-    via the stationDay time-series endpoint -- see "Yesterday" note above.
+    """Best-effort fallback for a specific past date's production/consumption/
+    grid-export, via the stationDay time-series endpoint -- see "Yesterday"
+    note above. One call covers all three metrics (rather than a separate
+    request per metric) since they're all in the same per-day record set.
     Unlike fetch_station_detail, failure here isn't fatal to the whole run,
     so it swallows its own errors (after _call's retry) and returns
-    (None, None) rather than raising."""
+    (None, None, None) rather than raising."""
     try:
         resp = _call(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
         print(f"stationDay fetch for {date_str} failed ({e})")
-        return None, None
+        return None, None, None
     records = resp.get("data")
     if not isinstance(records, list) or not records:
-        return None, None
+        return None, None, None
 
     def _series(candidates):
         for key in candidates:
@@ -285,7 +298,11 @@ def fetch_day_totals(station_id, date_str):
                 return max(values) if DAY_ENERGY_IS_CUMULATIVE else sum(values)
         return None
 
-    return _series(DAY_RECORD_PRODUCE_CANDIDATES), _series(DAY_RECORD_CONSUME_CANDIDATES)
+    return (
+        _series(DAY_RECORD_PRODUCE_CANDIDATES),
+        _series(DAY_RECORD_CONSUME_CANDIDATES),
+        _series(DAY_RECORD_GRID_EXPORT_CANDIDATES),
+    )
 
 
 def _pick(data, candidates):
@@ -366,21 +383,25 @@ def main():
     battery_pct, _ = _pick(data, BATTERY_SOC_CANDIDATES)
     today_kwh, today_unit = _pick(data, TODAY_PRODUCTION_CANDIDATES)
     today_consumption_kwh, today_consumption_unit = _pick(data, TODAY_CONSUMPTION_CANDIDATES)
+    today_export_kwh, today_export_unit = _pick(data, TODAY_GRID_EXPORT_CANDIDATES)
     yesterday_kwh, _ = _pick(data, YESTERDAY_PRODUCTION_CANDIDATES)
     yesterday_consumption_kwh, _ = _pick(data, YESTERDAY_CONSUMPTION_CANDIDATES)
+    yesterday_export_kwh, _ = _pick(data, YESTERDAY_GRID_EXPORT_CANDIDATES)
     total_kwh, total_unit = _pick(data, TOTAL_ENERGY_CANDIDATES)
 
-    if yesterday_kwh is None or yesterday_consumption_kwh is None:
+    if yesterday_kwh is None or yesterday_consumption_kwh is None or yesterday_export_kwh is None:
         yesterday_date = (dt.datetime.now(LOCAL_TZ).date() - dt.timedelta(days=1)).isoformat()
         try:
-            day_produce, day_consume = fetch_day_totals(station_id, yesterday_date)
+            day_produce, day_consume, day_export = fetch_day_totals(station_id, yesterday_date)
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
             print(f"stationDay fallback for yesterday's totals failed ({e})")
-            day_produce, day_consume = None, None
+            day_produce, day_consume, day_export = None, None, None
         if yesterday_kwh is None:
             yesterday_kwh = day_produce
         if yesterday_consumption_kwh is None:
             yesterday_consumption_kwh = day_consume
+        if yesterday_export_kwh is None:
+            yesterday_export_kwh = day_export
 
     if power_kw is None and today_kwh is None:
         known = ", ".join(sorted(data.keys()))
@@ -402,8 +423,11 @@ def main():
         "today_unit": today_unit,
         "today_consumption_kwh": today_consumption_kwh,
         "today_consumption_unit": today_consumption_unit,
+        "today_export_kwh": today_export_kwh,
+        "today_export_unit": today_export_unit,
         "yesterday_kwh": yesterday_kwh,
         "yesterday_consumption_kwh": yesterday_consumption_kwh,
+        "yesterday_export_kwh": yesterday_export_kwh,
         "total_kwh": total_kwh,
         "total_unit": total_unit,
         "raw": data,

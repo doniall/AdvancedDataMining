@@ -599,16 +599,20 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
     y += 20
 
-    def day_pair(title, prod, cons, y):
+    def day_triple(title, prod, cons, exp, y):
         d.text((x, y), title, fill=COAST_LINE, font=label_font)
         y += 22
         d.text((x, y), f"Produced  {_fmt_stat(prod, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
         y += 25
         d.text((x, y), f"Used      {_fmt_stat(cons, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
+        y += 25
+        d.text((x, y), f"Exported  {_fmt_stat(exp, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
         return y + 38
 
-    y = day_pair("TODAY", solis.get("today_kwh"), solis.get("today_consumption_kwh"), y)
-    day_pair("YESTERDAY", solis.get("yesterday_kwh"), solis.get("yesterday_consumption_kwh"), y)
+    y = day_triple("TODAY", solis.get("today_kwh"), solis.get("today_consumption_kwh"),
+                   solis.get("today_export_kwh"), y)
+    day_triple("YESTERDAY", solis.get("yesterday_kwh"), solis.get("yesterday_consumption_kwh"),
+               solis.get("yesterday_export_kwh"), y)
 
 
 def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
