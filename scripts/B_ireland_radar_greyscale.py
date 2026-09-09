@@ -146,6 +146,7 @@ def load_counties():
         return [np.array(r, float) for r in json.load(f)]
 
 SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
+SOLIS_STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solis_status.json")
 
 # how a ship's "now" position and trail are picked out of its recorded
 # history, relative to the timestamp of the frame being rendered (not
@@ -176,6 +177,15 @@ def load_ship_history():
     if not os.path.exists(SHIP_HISTORY_PATH):
         return {}
     with open(SHIP_HISTORY_PATH) as f:
+        return json.load(f)
+
+
+def load_solis_status():
+    """Latest numbers written by G_solis_fetch.py -- None (no solar block)
+    if that script hasn't been run yet, so drawing it is entirely optional."""
+    if not os.path.exists(SOLIS_STATUS_PATH):
+        return None
+    with open(SOLIS_STATUS_PATH) as f:
         return json.load(f)
 
 
@@ -524,7 +534,7 @@ def build_window():
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
 
 
-def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
+def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -607,6 +617,18 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         d.text((16, 12), "Met Éireann", fill=COAST_LINE, font=label_font)
         d.text((16, 34), frame_time.strftime("%d/%m/%Y, %H:%M"), fill=COAST_LINE, font=time_font)
 
+    power_kw = solis.get("power_kw") if solis else None
+    today_kwh = solis.get("today_kwh") if solis else None
+    if power_kw is not None or today_kwh is not None:
+        label_font = _load_font(18)
+        time_font = _load_font(30)
+        right_x = img.width - 16
+        d.text((right_x, 12), "Solis Solar", fill=COAST_LINE, font=label_font, anchor="ra")
+        power_str = f"{power_kw:.2f} kW now" if power_kw is not None else "-- kW now"
+        today_str = f"{today_kwh:.1f} kWh today" if today_kwh is not None else "-- kWh today"
+        d.text((right_x, 34), power_str, fill=COAST_LINE, font=time_font, anchor="ra")
+        d.text((right_x, 64), today_str, fill=COAST_LINE, font=label_font, anchor="ra")
+
     return img
 
 
@@ -634,7 +656,8 @@ def main():
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
     ship_history = load_ship_history()
-    
+    solis = load_solis_status()
+
     for imgpath in png_files:
         print(f"{imgpath}")
         src = Image.open(f"{RadarImageSubfolder}/{imgpath}").convert("RGB") if imgpath else fetch_latest()
@@ -649,7 +672,7 @@ def main():
         )
         at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
         ships = ships_at(ship_history, at_time)
-        img = render(src, load_counties(), load_coastline(), frame_time, ships)
+        img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
