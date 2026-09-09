@@ -129,6 +129,13 @@ REQUEST_RETRY_DELAY_SECONDS = 5
 # see "Yesterday" note above
 DAY_ENERGY_IS_CUMULATIVE = True
 
+# a single day's production/consumption/export from a residential system
+# can't plausibly exceed this -- comfortably above what even a large (~20kWp)
+# home system produces on its best day. Guards fetch_day_totals() against a
+# units mismatch on the (unconfirmed) stationDay endpoint silently showing a
+# wrong-order-of-magnitude number instead of a missing one.
+DAY_TOTAL_SANITY_CEILING_KWH = 200
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
 STATE_PATH = os.path.join(HERE, "solis_fetch_state.json")   # last attempt time + consecutive failures, see BACKOFF_SCHEDULE_MINUTES
@@ -281,27 +288,45 @@ def fetch_day_totals(station_id, date_str):
     request per metric) since they're all in the same per-day record set.
     Unlike fetch_station_detail, failure here isn't fatal to the whole run,
     so it swallows its own errors (after _call's retry) and returns
-    (None, None, None) rather than raising."""
+    (None, None, None, None) rather than raising.
+
+    Returns (produce_kwh, consume_kwh, export_kwh, debug_sample) -- the last
+    is a couple of raw records as returned by SolisCloud, unmodified, kept
+    only so a bad reading can be diagnosed from solis_status.json instead of
+    needing a live capture from the account. This endpoint's exact record
+    shape (units especially -- possibly Wh, not kWh, unlike stationDetail's
+    already-converted fields) isn't confirmed, so DAY_TOTAL_SANITY_CEILING_KWH
+    below guards against ever displaying a wrong-order-of-magnitude number
+    from a units mismatch here."""
     try:
         resp = _call(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
         print(f"stationDay fetch for {date_str} failed ({e})")
-        return None, None, None
+        return None, None, None, None
     records = resp.get("data")
     if not isinstance(records, list) or not records:
-        return None, None, None
+        return None, None, None, None
+    debug_sample = [r for r in records if isinstance(r, dict)][:3]
 
-    def _series(candidates):
+    def _series(candidates, label):
         for key in candidates:
             values = [float(r[key]) for r in records if isinstance(r, dict) and r.get(key) is not None]
-            if values:
-                return max(values) if DAY_ENERGY_IS_CUMULATIVE else sum(values)
+            if not values:
+                continue
+            result = max(values) if DAY_ENERGY_IS_CUMULATIVE else sum(values)
+            if result > DAY_TOTAL_SANITY_CEILING_KWH:
+                print(f"stationDay {label} ({key}={result}) exceeds the {DAY_TOTAL_SANITY_CEILING_KWH} kWh "
+                      "sanity ceiling for one day -- likely a units mismatch (Wh vs kWh?) on this endpoint, "
+                      "discarding rather than showing a wrong number. See debug_sample in solis_status.json.")
+                return None
+            return result
         return None
 
     return (
-        _series(DAY_RECORD_PRODUCE_CANDIDATES),
-        _series(DAY_RECORD_CONSUME_CANDIDATES),
-        _series(DAY_RECORD_GRID_EXPORT_CANDIDATES),
+        _series(DAY_RECORD_PRODUCE_CANDIDATES, "production"),
+        _series(DAY_RECORD_CONSUME_CANDIDATES, "consumption"),
+        _series(DAY_RECORD_GRID_EXPORT_CANDIDATES, "grid export"),
+        debug_sample,
     )
 
 
@@ -389,10 +414,11 @@ def main():
     yesterday_export_kwh, _ = _pick(data, YESTERDAY_GRID_EXPORT_CANDIDATES)
     total_kwh, total_unit = _pick(data, TOTAL_ENERGY_CANDIDATES)
 
+    yesterday_debug_sample = None
     if yesterday_kwh is None or yesterday_consumption_kwh is None or yesterday_export_kwh is None:
         yesterday_date = (dt.datetime.now(LOCAL_TZ).date() - dt.timedelta(days=1)).isoformat()
         try:
-            day_produce, day_consume, day_export = fetch_day_totals(station_id, yesterday_date)
+            day_produce, day_consume, day_export, yesterday_debug_sample = fetch_day_totals(station_id, yesterday_date)
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
             print(f"stationDay fallback for yesterday's totals failed ({e})")
             day_produce, day_consume, day_export = None, None, None
@@ -428,6 +454,7 @@ def main():
         "yesterday_kwh": yesterday_kwh,
         "yesterday_consumption_kwh": yesterday_consumption_kwh,
         "yesterday_export_kwh": yesterday_export_kwh,
+        "yesterday_debug_sample": yesterday_debug_sample,   # raw stationDay records, see fetch_day_totals docstring
         "total_kwh": total_kwh,
         "total_unit": total_unit,
         "raw": data,
