@@ -88,6 +88,18 @@ STATION_DAY_PATH = "/v1/api/stationDay"
 # fresh pull every time 0_Run_Radar_And_Greyscale.py fires
 MIN_FETCH_INTERVAL_MINUTES = 5
 
+# SolisCloud's authenticated endpoints (stationDetail/inverterDetail
+# especially) are reported elsewhere as slow or intermittently flaky under
+# load, independent of your own network -- confirmed here by curl getting
+# an instant reply for an unsigned request (rejected before touching the
+# backend) while a properly-signed stationDetail call hung past the old
+# 20s timeout. One retry after a real timeout, or after Solis's own
+# "Communication error ... try again later" response, covers that without
+# hammering the API on a hard failure (bad signature, unknown station id).
+REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_RETRIES = 1
+REQUEST_RETRY_DELAY_SECONDS = 5
+
 # see "Yesterday" note above
 DAY_ENERGY_IS_CUMULATIVE = True
 
@@ -164,8 +176,27 @@ def _sign_and_post(path, payload):
         "Authorization": f"API {KEY_ID}:{signature}",
     }
     req = urllib.request.Request(DOMAIN + path, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         return json.loads(resp.read())
+
+
+def _call(path, payload):
+    """_sign_and_post, but retries once on a network-level failure or on
+    Solis's own retryable "code" != success -- see REQUEST_RETRIES above."""
+    last_error = None
+    for attempt in range(REQUEST_RETRIES + 1):
+        try:
+            resp = _sign_and_post(path, payload)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_error = e
+        else:
+            if str(resp.get("code")) in ("0", "0000"):
+                return resp
+            last_error = RuntimeError(f"{path} returned {resp.get('code')}: {resp.get('msg')}")
+        if attempt < REQUEST_RETRIES:
+            print(f"SolisCloud call to {path} failed ({last_error}); retrying in {REQUEST_RETRY_DELAY_SECONDS}s...")
+            time.sleep(REQUEST_RETRY_DELAY_SECONDS)
+    raise last_error
 
 
 def _find_dicts_with_key(obj, key, out):
@@ -183,9 +214,7 @@ def _find_dicts_with_key(obj, key, out):
 
 
 def discover_station_id():
-    resp = _sign_and_post(USER_STATION_LIST_PATH, {"pageNo": 1, "pageSize": 10})
-    if str(resp.get("code")) not in ("0", "0000"):
-        raise RuntimeError(f"userStationList returned {resp.get('code')}: {resp.get('msg')}")
+    resp = _call(USER_STATION_LIST_PATH, {"pageNo": 1, "pageSize": 10})
     candidates = []
     _find_dicts_with_key(resp.get("data"), "id", candidates)
     if not candidates:
@@ -194,9 +223,7 @@ def discover_station_id():
 
 
 def fetch_station_detail(station_id):
-    resp = _sign_and_post(STATION_DETAIL_PATH, {"id": station_id})
-    if str(resp.get("code")) not in ("0", "0000"):
-        raise RuntimeError(f"stationDetail returned {resp.get('code')}: {resp.get('msg')}")
+    resp = _call(STATION_DETAIL_PATH, {"id": station_id})
     data = resp.get("data")
     if not isinstance(data, dict):
         raise RuntimeError("stationDetail response had no usable 'data' object")
@@ -205,9 +232,14 @@ def fetch_station_detail(station_id):
 
 def fetch_day_totals(station_id, date_str):
     """Best-effort fallback for a specific past date's production/consumption,
-    via the stationDay time-series endpoint -- see "Yesterday" note above."""
-    resp = _sign_and_post(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
-    if str(resp.get("code")) not in ("0", "0000"):
+    via the stationDay time-series endpoint -- see "Yesterday" note above.
+    Unlike fetch_station_detail, failure here isn't fatal to the whole run,
+    so it swallows its own errors (after _call's retry) and returns
+    (None, None) rather than raising."""
+    try:
+        resp = _call(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
+    except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
+        print(f"stationDay fetch for {date_str} failed ({e})")
         return None, None
     records = resp.get("data")
     if not isinstance(records, list) or not records:
@@ -254,7 +286,7 @@ def main():
     try:
         station_id = STATION_ID or discover_station_id()
         data = fetch_station_detail(station_id)
-    except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError, KeyError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError, KeyError) as e:
         print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place")
         return
 
