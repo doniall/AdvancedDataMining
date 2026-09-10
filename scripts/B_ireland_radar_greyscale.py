@@ -35,7 +35,7 @@ NOTE
 import os, sys, io, json, math, datetime as dt
 from zoneinfo import ZoneInfo
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 import A_met_radar_probe as radar_probe
 
@@ -742,6 +742,26 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     for ring in rings_Coast:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
 
+    # trails and marks are drawn in separate passes below, not interleaved
+    # per ship, so a later ship's trail can never cover an earlier ship's
+    # own mark -- with independent ships potentially close together, z-order
+    # by loop position was otherwise arbitrary. Marks are collected here and
+    # drawn last, on top of every trail.
+    mark_draws = []
+
+    # only a trail's newest segment (into the ship's current position) may
+    # cover rain -- older segments must not obscure it. lvl (per output
+    # pixel, 0 = no rain) already exists from the radar classification
+    # above; PIL can't skip pixels conditionally mid-line, so older segments
+    # are drawn onto scratch layers first and composited back through a
+    # not-rain mask, while the newest segment (and the halo backing, which
+    # is already background-colored and reads fine over rain) draw directly
+    not_rain_img = Image.fromarray((lvl == 0).astype(np.uint8) * 255, "L")
+    old_trail_color = Image.new("L", img.size, 0)
+    old_trail_draw = ImageDraw.Draw(old_trail_color)
+    old_trail_coverage = Image.new("L", img.size, 0)
+    old_trail_coverage_draw = ImageDraw.Draw(old_trail_coverage)
+
     for ship in ships or []:
         lon, lat = ship.get("lon"), ship.get("lat")
         if lon is None or lat is None:
@@ -751,19 +771,29 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
         trail = ship.get("trail") or []
         if trail:
             pts = [ll2r(p["lon"], p["lat"]) for p in trail] + [(x, y)]
-            d.line(pts, fill=SHIP_HALO, width=3, joint="curve")   # halo backing -- already
-                                                                   # background-colored, so it
-                                                                   # doesn't need to fade per-segment
+            # each segment's halo backing is drawn alongside its own fill
+            # below, NOT as one blanket line across the whole trail -- a
+            # blanket halo draw would paint background color (still a
+            # visible overwrite) across older segments too, exactly what
+            # the "don't cover rain" rule below is trying to prevent
+            #
             # each segment fades by the age of its older (trailing) end, same
             # formula as the ship mark's own age fade below -- so the trail
             # lightens smoothly section by section the further back it goes,
             # and its newest segment (into the current position) ends at
             # exactly the mark's own fade level, not a mismatched fixed color
             ages = [p["age_minutes"] for p in trail] + [ship.get("age_minutes", 0)]
+            newest_i = len(pts) - 2
             for i in range(len(pts) - 1):
                 seg_frac = min(max(ages[i] / SHIP_MAX_AGE_MINUTES, 0), 1)
                 seg_fill = round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK))
-                d.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                if i == newest_i:
+                    d.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    d.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                else:
+                    old_trail_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    old_trail_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    old_trail_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
 
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
@@ -780,6 +810,12 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
         # ship fades smoothly out of view instead of popping off the map
         age_frac = min(max(ship.get("age_minutes", 0) / SHIP_MAX_AGE_MINUTES, 0), 1)
         mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
+        mark_draws.append((x, y, direction, mark_fill))
+
+    old_trail_mask = ImageChops.multiply(old_trail_coverage, not_rain_img)
+    img.paste(old_trail_color, (0, 0), old_trail_mask)
+
+    for x, y, direction, mark_fill in mark_draws:
         _draw_ship(d, x, y, direction, mark_fill)
 
     mx, my = ll2r(LOCATION_LON, LOCATION_LAT)
