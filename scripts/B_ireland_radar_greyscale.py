@@ -40,8 +40,8 @@ from PIL import Image, ImageDraw, ImageFont
 import A_met_radar_probe as radar_probe
 
 # ===================== EDIT THESE =====================
-LOCATION_LAT = 53.3498      # your home latitude   (default: Dublin)
-LOCATION_LON = -6.2603      # your home longitude
+LOCATION_LAT = 52.6175      # your home latitude   (Kildimo, Co. Limerick)
+LOCATION_LON = -8.8094      # your home longitude
 VIEW         = "portrait"   # "portrait"  = Ireland fills the frame (Atlantic margin)
                             # "landscape" = full Met Eireann extent, out to Wales
 
