@@ -189,6 +189,11 @@ TODAY_GRID_EXPORT_CANDIDATES = [
     ("gridSellEnergy", "gridSellEnergyStr"),
     ("gridSellTodayEnergy", "gridSellTodayEnergyUnit"),
 ]
+TODAY_GRID_IMPORT_CANDIDATES = [
+    ("gridPurchasedDayEnergy", "gridPurchasedDayEnergyStr"),   # confirmed against a real capture
+    ("gridPurchasedEnergy", "gridPurchasedEnergyStr"),
+    ("gridPurchasedTodayEnergy", "gridPurchasedTodayEnergyUnit"),
+]
 YESTERDAY_PRODUCTION_CANDIDATES = [
     ("eYesterday", "eYesterdayUnit"),
     ("yesterdayEnergy", "yesterdayEnergyUnit"),
@@ -445,6 +450,7 @@ def main():
     today_kwh, today_unit = _pick(data, TODAY_PRODUCTION_CANDIDATES)
     today_consumption_kwh, today_consumption_unit = _pick(data, TODAY_CONSUMPTION_CANDIDATES)
     today_export_kwh, today_export_unit = _pick(data, TODAY_GRID_EXPORT_CANDIDATES)
+    today_import_kwh, today_import_unit = _pick(data, TODAY_GRID_IMPORT_CANDIDATES)
     yesterday_kwh, _ = _pick(data, YESTERDAY_PRODUCTION_CANDIDATES)
     yesterday_consumption_kwh, _ = _pick(data, YESTERDAY_CONSUMPTION_CANDIDATES)
     yesterday_export_kwh, _ = _pick(data, YESTERDAY_GRID_EXPORT_CANDIDATES)
@@ -502,6 +508,8 @@ def main():
         "today_consumption_unit": today_consumption_unit,
         "today_export_kwh": today_export_kwh,
         "today_export_unit": today_export_unit,
+        "today_import_kwh": today_import_kwh,
+        "today_import_unit": today_import_unit,
         "yesterday_kwh": yesterday_kwh,
         "yesterday_consumption_kwh": yesterday_consumption_kwh,
         "yesterday_export_kwh": yesterday_export_kwh,

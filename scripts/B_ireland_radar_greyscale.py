@@ -626,6 +626,7 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     y = stat("PRODUCED TODAY", _fmt_stat(solis.get("today_kwh"), "kWh", 1), y)
     y = stat("USED TODAY", _fmt_stat(solis.get("today_consumption_kwh"), "kWh", 1), y)
     y = stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
+    y = stat("IMPORTED TODAY", _fmt_stat(solis.get("today_import_kwh"), "kWh", 1), y)
 
     y += 14
     d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
