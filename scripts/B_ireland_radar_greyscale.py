@@ -219,13 +219,28 @@ def _sample_at_or_before(samples, target, time_key="t"):
 
 
 def solis_at(history, at_time):
-    """The Solis reading that was actually current at at_time -- the frame's
-    own timestamp, not whenever this script happens to run -- so a backlog
-    of radar frames each show the solar data as it actually was then,
-    instead of all showing today's living reading stamped onto every one of
-    them (the same problem ships_at() solves for AIS). None if history
-    predates at_time entirely (e.g. before G_solis_fetch.py was first run)."""
-    return _sample_at_or_before(history, at_time, time_key="fetched_at")
+    """The Solis reading closest in time to at_time -- so a backlog of radar
+    frames each show the solar data as it actually was then, instead of all
+    showing today's living reading stamped onto every one of them (the same
+    problem ships_at() solves for AIS). None only if there's no history at
+    all yet.
+
+    Deliberately NOT _sample_at_or_before()'s strict "latest at-or-before"
+    rule, even though that's exactly right for ships: a ship's future
+    position genuinely isn't knowable yet, so showing it early would be
+    fabricating data that didn't exist at that frame's time. A Solis
+    reading doesn't have that problem on a live run -- 0_Run_Radar_And_
+    Greyscale.py fetches the radar frame first and Solis a little later in
+    the same cycle, and Met Eireann's own publish lag routinely leaves the
+    frame's own timestamp a few minutes behind "now" while G_solis_fetch.py's
+    fetched_at reflects "now" -- so the just-fetched reading is almost
+    always a few minutes "after" the frame it's meant to accompany. That's
+    not future data, just a different-latency source; requiring strictly-
+    before excluded the very reading fetched for that render, every time,
+    leaving the panel blank on every live run."""
+    if not history:
+        return None
+    return min(history, key=lambda r: abs((dt.datetime.fromisoformat(r["fetched_at"]) - at_time).total_seconds()))
 
 
 def ships_at(history, at_time):
