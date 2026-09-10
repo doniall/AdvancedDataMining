@@ -143,6 +143,8 @@ DAY_TOTAL_SANITY_CEILING_KWH = 200
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
+DEVICE_PATH = os.path.join(HERE, "solis_device.json")   # curated, no "raw" -- meant to be served
+                                                          # to the E1003 itself; see main()
 STATE_PATH = os.path.join(HERE, "solis_fetch_state.json")   # last attempt time + consecutive failures, see BACKOFF_SCHEDULE_MINUTES
 HISTORY_PATH = os.path.join(HERE, "solis_history.json")     # every successful reading, see _append_history()
 
@@ -564,6 +566,15 @@ def main():
 
     with open(STATUS_PATH, "w") as f:
         json.dump(status, f, indent=2)
+
+    # a slimmed-down copy meant to actually be served to the E1003 itself --
+    # solis_status.json's "raw" field is the full SolisCloud response
+    # (~200 fields, including a large embedded strategy-config blob) and
+    # isn't something a memory-constrained ESP32-class device should have to
+    # fetch and parse just to read a dozen numbers off it
+    device_view = {k: v for k, v in status.items() if k not in ("raw", "yesterday_debug_sample")}
+    with open(DEVICE_PATH, "w") as f:
+        json.dump(device_view, f, separators=(",", ":"))
 
     _append_history(status)
 
