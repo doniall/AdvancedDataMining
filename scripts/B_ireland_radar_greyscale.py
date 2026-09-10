@@ -49,7 +49,8 @@ SHOW_SOLIS_STRIP = True     # reserve a vertical strip for SolisCloud stats,
                             # carved out of the map's own width rather than
                             # added on top of the fixed device resolution
 SOLIS_STRIP_WIDTH = 320     # px, taken off the right edge of the canvas
-GRID_POSITIVE_MEANS_EXPORT = True   # flip if your account's grid power sign is reversed -- see G_solis_fetch.py
+GRID_POSITIVE_MEANS_EXPORT = True     # flip if your account's grid power sign is reversed -- see G_solis_fetch.py
+BATTERY_POSITIVE_MEANS_CHARGING = True   # flip if your account's battery power sign is reversed -- see G_solis_fetch.py
 # ======================================================
 
 # --- tile-grid projection (exact; derived from A_met_radar_probe's tile grid) ---
@@ -570,7 +571,6 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     header_font = _load_font(20)
     label_font = _load_font(15)
     value_font = _load_font(30)
-    sub_font = _load_font(19)
 
     d.text((x, y), "SOLIS SOLAR", fill=COAST_LINE, font=header_font)
     y += 42
@@ -595,24 +595,28 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     battery_pct = solis.get("battery_pct")
     y = stat("BATTERY", f"{battery_pct:.0f} %" if battery_pct is not None else "-- %", y)
 
+    # a battery genuinely sits at (or within noise of) zero flow often --
+    # full, or no surplus/deficit to charge or drain -- so that's its own
+    # neutral state rather than being called "charging 0.00 kW"
+    battery_kw = solis.get("battery_kw")
+    BATTERY_IDLE_THRESHOLD_KW = 0.05
+    if battery_kw is None:
+        batt_label, batt_str = "BATTERY", "--"
+    elif abs(battery_kw) < BATTERY_IDLE_THRESHOLD_KW:
+        batt_label, batt_str = "BATTERY IDLE", "0.00 kW"
+    else:
+        charging = (battery_kw >= 0) == BATTERY_POSITIVE_MEANS_CHARGING
+        batt_label = "CHARGING BATTERY" if charging else "DISCHARGING BATTERY"
+        batt_str = f"{abs(battery_kw):.2f} kW"
+    y = stat(batt_label, batt_str, y)
+
     y += 14
     d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
     y += 20
 
-    def day_triple(title, prod, cons, exp, y):
-        d.text((x, y), title, fill=COAST_LINE, font=label_font)
-        y += 22
-        d.text((x, y), f"Produced  {_fmt_stat(prod, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
-        y += 25
-        d.text((x, y), f"Used      {_fmt_stat(cons, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
-        y += 25
-        d.text((x, y), f"Exported  {_fmt_stat(exp, 'kWh', 1)}", fill=COAST_LINE, font=sub_font)
-        return y + 38
-
-    y = day_triple("TODAY", solis.get("today_kwh"), solis.get("today_consumption_kwh"),
-                   solis.get("today_export_kwh"), y)
-    day_triple("YESTERDAY", solis.get("yesterday_kwh"), solis.get("yesterday_consumption_kwh"),
-               solis.get("yesterday_export_kwh"), y)
+    y = stat("PRODUCED TODAY", _fmt_stat(solis.get("today_kwh"), "kWh", 1), y)
+    y = stat("USED TODAY", _fmt_stat(solis.get("today_consumption_kwh"), "kWh", 1), y)
+    stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
 
 
 def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):

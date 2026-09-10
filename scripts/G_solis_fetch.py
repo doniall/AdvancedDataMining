@@ -163,6 +163,13 @@ GRID_NOW_CANDIDATES = [
                             # power - familyLoadPower - batteryPower == psum
     ("gridPower", "gridPowerUnit"),
 ]
+BATTERY_POWER_CANDIDATES = [
+    ("batteryPower", "batteryPowerStr"),   # confirmed against a real capture. Sign confirmed
+                                            # positive=charging by the same energy-balance check
+                                            # as psum above: power - familyLoadPower - batteryPower
+                                            # == psum only holds if positive batteryPower is power
+                                            # flowing INTO the battery (charging), not out of it.
+]
 BATTERY_SOC_CANDIDATES = [
     ("batteryCapacitySoc", None),
     ("batteryPercent", None),
@@ -406,6 +413,7 @@ def main():
     consumption_kw, consumption_unit = _pick(data, CONSUMPTION_NOW_CANDIDATES)
     grid_kw, grid_unit = _pick(data, GRID_NOW_CANDIDATES)
     battery_pct, _ = _pick(data, BATTERY_SOC_CANDIDATES)
+    battery_kw, battery_power_unit = _pick(data, BATTERY_POWER_CANDIDATES)
     today_kwh, today_unit = _pick(data, TODAY_PRODUCTION_CANDIDATES)
     today_consumption_kwh, today_consumption_unit = _pick(data, TODAY_CONSUMPTION_CANDIDATES)
     today_export_kwh, today_export_unit = _pick(data, TODAY_GRID_EXPORT_CANDIDATES)
@@ -445,6 +453,8 @@ def main():
         "grid_kw": grid_kw,
         "grid_unit": grid_unit,
         "battery_pct": battery_pct,
+        "battery_kw": battery_kw,
+        "battery_power_unit": battery_power_unit,
         "today_kwh": today_kwh,
         "today_unit": today_unit,
         "today_consumption_kwh": today_consumption_kwh,
