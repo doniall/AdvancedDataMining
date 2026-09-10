@@ -215,6 +215,34 @@ DAY_RECORD_PRODUCE_CANDIDATES = ["produceEnergy", "energy", "eToday"]
 DAY_RECORD_CONSUME_CANDIDATES = ["consumeEnergy", "useEnergy", "homeLoadEnergy"]
 DAY_RECORD_GRID_EXPORT_CANDIDATES = ["gridSellEnergy", "sellEnergy", "onGridEnergy"]
 
+# Solis's own weather lookup for the station's location -- confirmed present
+# in a real capture, all as plain strings/numbers (not the value+unit pairs
+# above). A second, parallel set (windSpeed, humidity, temp, rainfall,
+# airPressure, weatherType) was all zero in that same capture -- looks like
+# an unpopulated numeric schema, so the string-keyed fields below are used
+# instead. This is Solis's forecast for the site, not a measurement -- same
+# kind of source as the SolisCloud portal's own weather panel, independent
+# of whatever radar source the rest of this display uses.
+WEATHER_CONDITION_CANDIDATES = ["condTxtD", "condTxtN"]
+WEATHER_TEMP_MIN_CANDIDATES = ["tmpMin"]
+WEATHER_TEMP_MAX_CANDIDATES = ["tmpMax"]
+WEATHER_HUMIDITY_CANDIDATES = ["hum"]
+WEATHER_WIND_SPEED_CANDIDATES = ["windSpd"]   # unit not stated anywhere in the response -- shown without one
+WEATHER_WIND_DIR_CANDIDATES = ["windDir"]
+WEATHER_PRESSURE_CANDIDATES = ["pres"]        # value range (~1018) is unambiguously hPa
+WEATHER_PRECIP_CANDIDATES = ["pcpn"]          # assumed precipitation probability (%) -- not confirmed
+WEATHER_SUNRISE_CANDIDATES = ["sr"]
+WEATHER_SUNSET_CANDIDATES = ["ss"]
+
+
+def _pick_raw(data, candidates):
+    """Like _pick, but for plain pass-through fields (weather) that aren't a
+    (value, unit) pair and don't need float conversion."""
+    for key in candidates:
+        if data.get(key) not in (None, ""):
+            return data[key]
+    return None
+
 
 def _sign_and_post(path, payload):
     body = json.dumps(payload, separators=(",", ":")).encode()
@@ -443,6 +471,19 @@ def main():
               f"actual keys were: {known}. Add the right one to G_solis_fetch.py's candidate "
               "lists -- the raw response is saved in solis_status.json either way.")
 
+    weather = {
+        "condition": _pick_raw(data, WEATHER_CONDITION_CANDIDATES),
+        "temp_min": _pick_raw(data, WEATHER_TEMP_MIN_CANDIDATES),
+        "temp_max": _pick_raw(data, WEATHER_TEMP_MAX_CANDIDATES),
+        "humidity": _pick_raw(data, WEATHER_HUMIDITY_CANDIDATES),
+        "wind_speed": _pick_raw(data, WEATHER_WIND_SPEED_CANDIDATES),
+        "wind_dir": _pick_raw(data, WEATHER_WIND_DIR_CANDIDATES),
+        "pressure": _pick_raw(data, WEATHER_PRESSURE_CANDIDATES),
+        "precip": _pick_raw(data, WEATHER_PRECIP_CANDIDATES),
+        "sunrise": _pick_raw(data, WEATHER_SUNRISE_CANDIDATES),
+        "sunset": _pick_raw(data, WEATHER_SUNSET_CANDIDATES),
+    }
+
     status = {
         "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "station_id": station_id,
@@ -467,6 +508,7 @@ def main():
         "yesterday_debug_sample": yesterday_debug_sample,   # raw stationDay records, see fetch_day_totals docstring
         "total_kwh": total_kwh,
         "total_unit": total_unit,
+        "weather": weather,
         "raw": data,
     }
 

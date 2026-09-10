@@ -616,7 +616,41 @@ def _draw_solis_strip(d, x0, x1, H, solis):
 
     y = stat("PRODUCED TODAY", _fmt_stat(solis.get("today_kwh"), "kWh", 1), y)
     y = stat("USED TODAY", _fmt_stat(solis.get("today_consumption_kwh"), "kWh", 1), y)
-    stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
+    y = stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
+
+    y += 14
+    d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
+    y += 20
+
+    weather = solis.get("weather") or {}
+    d.text((x, y), "WEATHER AT SITE", fill=COAST_LINE, font=label_font)
+    y += 28
+    weather_font = _load_font(18)
+
+    def wline(label, value, y):
+        text = value if value not in (None, "") else "--"
+        d.text((x, y), f"{label}: {text}", fill=COAST_LINE, font=weather_font)
+        return y + 25
+
+    temp_min, temp_max = weather.get("temp_min"), weather.get("temp_max")
+    temp_str = f"{temp_min}–{temp_max}°C" if temp_min is not None and temp_max is not None else None
+    humidity = weather.get("humidity")
+    wind_speed, wind_dir = weather.get("wind_speed"), weather.get("wind_dir")
+    wind_str = " ".join(v for v in (wind_speed, wind_dir) if v) or None
+    pressure = weather.get("pressure")
+    pressure_str = f"{pressure} hPa" if pressure is not None else None
+    precip = weather.get("precip")
+    precip_str = f"{precip}%" if precip is not None else None
+    sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
+    sun_str = f"{sunrise} – {sunset}" if sunrise and sunset else None
+
+    y = wline("Condition", weather.get("condition"), y)
+    y = wline("Temp", temp_str, y)
+    y = wline("Humidity", f"{humidity}%" if humidity is not None else None, y)
+    y = wline("Wind", wind_str, y)
+    y = wline("Pressure", pressure_str, y)
+    y = wline("Precip", precip_str, y)
+    wline("Sun", sun_str, y)
 
 
 def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
