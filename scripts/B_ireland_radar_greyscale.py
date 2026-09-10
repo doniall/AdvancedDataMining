@@ -153,7 +153,7 @@ def load_counties():
         return [np.array(r, float) for r in json.load(f)]
 
 SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
-SOLIS_STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solis_status.json")
+SOLIS_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solis_history.json")
 
 # how a ship's "now" position and trail are picked out of its recorded
 # history, relative to the timestamp of the frame being rendered (not
@@ -187,33 +187,45 @@ def load_ship_history():
         return json.load(f)
 
 
-def load_solis_status():
-    """Latest numbers written by G_solis_fetch.py -- None (no solar block)
-    if that script hasn't been run yet, so drawing it is entirely optional."""
-    if not os.path.exists(SOLIS_STATUS_PATH):
-        return None
-    with open(SOLIS_STATUS_PATH) as f:
+def load_solis_history():
+    """Every successful reading G_solis_fetch.py has recorded -- [] (no solar
+    block) if that script hasn't been run yet, so drawing it is entirely
+    optional. A list, not keyed like ship_history.json, since there's only
+    ever one Solis account/station here."""
+    if not os.path.exists(SOLIS_HISTORY_PATH):
+        return []
+    with open(SOLIS_HISTORY_PATH) as f:
         return json.load(f)
 
 
-def _sample_at_or_before(samples, target):
-    """The latest sample at or before `target`, or None if the ship has no
-    samples that old yet. Deliberately NOT "whichever sample is closest" --
+def _sample_at_or_before(samples, target, time_key="t"):
+    """The latest sample at or before `target`, or None if there's no
+    sample that old yet. Deliberately NOT "whichever sample is closest" --
     that flips between two samples right at their midpoint, so on a
     sequence of frames a few minutes apart (Met Eireann's own 5-min radar
-    cadence, much tighter than AIS's ~15-20 min sample spacing) a ship's
-    position and trail would jump discontinuously mid-sequence purely
-    because a later sample became slightly nearer than an earlier one, with
-    nothing in the actual ship movement to justify it. Picking "latest at
-    or before" instead is monotonic as at_time advances through a frame
-    sequence: a ship holds its position, then steps forward exactly once
-    when new data becomes available, and never regresses to an older
-    sample or jumps ahead into what is, relative to that frame, the
-    future."""
-    candidates = [s for s in samples if dt.datetime.fromisoformat(s["t"]) <= target]
+    cadence, much tighter than AIS's ~15-20 min sample spacing, or Solis's
+    own ~5 min fetch cadence) a ship's position, or the solar reading shown
+    alongside it, would jump discontinuously mid-sequence purely because a
+    later sample became slightly nearer than an earlier one, with nothing
+    in the actual ship movement or solar output to justify it. Picking
+    "latest at or before" instead is monotonic as at_time advances through
+    a frame sequence: a value holds, then steps forward exactly once when
+    new data becomes available, and never regresses to an older sample or
+    jumps ahead into what is, relative to that frame, the future."""
+    candidates = [s for s in samples if dt.datetime.fromisoformat(s[time_key]) <= target]
     if not candidates:
         return None
-    return max(candidates, key=lambda s: s["t"])
+    return max(candidates, key=lambda s: s[time_key])
+
+
+def solis_at(history, at_time):
+    """The Solis reading that was actually current at at_time -- the frame's
+    own timestamp, not whenever this script happens to run -- so a backlog
+    of radar frames each show the solar data as it actually was then,
+    instead of all showing today's living reading stamped onto every one of
+    them (the same problem ships_at() solves for AIS). None if history
+    predates at_time entirely (e.g. before G_solis_fetch.py was first run)."""
+    return _sample_at_or_before(history, at_time, time_key="fetched_at")
 
 
 def ships_at(history, at_time):
@@ -582,7 +594,16 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     value_font = _load_font(30)
 
     d.text((x, y), "SOLIS SOLAR", fill=COAST_LINE, font=header_font)
-    y += 42
+    y += 26
+
+    fetched_at = solis.get("fetched_at")
+    if fetched_at:
+        local_t = dt.datetime.fromisoformat(fetched_at).astimezone(ZoneInfo("Europe/Dublin"))
+        as_of_str = f"reading as of {local_t.strftime('%H:%M')}"
+    else:
+        as_of_str = "reading as of --"
+    d.text((x, y), as_of_str, fill=COAST_LINE, font=label_font)
+    y += 30
 
     def stat(label, value_str, y):
         d.text((x, y), label, fill=COAST_LINE, font=label_font)
@@ -796,7 +817,7 @@ def main():
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
     ship_history = load_ship_history()
-    solis = load_solis_status()
+    solis_history = load_solis_history()
 
     for imgpath in png_files:
         print(f"{imgpath}")
@@ -812,6 +833,7 @@ def main():
         )
         at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
         ships = ships_at(ship_history, at_time)
+        solis = solis_at(solis_history, at_time)
         img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)

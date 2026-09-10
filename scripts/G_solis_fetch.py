@@ -3,9 +3,14 @@
 G_solis_fetch.py
 
 Pulls key numbers from your SolisCloud account and writes them to
-solis_status.json, so B_ireland_radar_greyscale.py can draw a stats strip
-alongside the radar. If solis_status.json doesn't exist yet, the strip
-just shows placeholders -- same "optional" pattern as ship_history.json.
+solis_status.json (the latest snapshot, plus the full raw response, for
+debugging) and appends them to solis_history.json (every successful
+reading, kept for HISTORY_RETENTION_MINUTES). B_ireland_radar_greyscale.py
+reads the history, not the status file, and picks whichever reading was
+actually current at each rendered frame's own timestamp -- see solis_at()
+there -- the same pattern ship_history.json already uses for AIS. If
+solis_history.json doesn't exist yet, the strip just shows placeholders --
+same "optional" pattern as ship_history.json.
 
 Metrics fetched (all best-effort -- see NOTE ON FIELD NAMES):
     - PV power right now (kW)
@@ -139,6 +144,13 @@ DAY_TOTAL_SANITY_CEILING_KWH = 200
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
 STATE_PATH = os.path.join(HERE, "solis_fetch_state.json")   # last attempt time + consecutive failures, see BACKOFF_SCHEDULE_MINUTES
+HISTORY_PATH = os.path.join(HERE, "solis_history.json")     # every successful reading, see _append_history()
+
+# how long solis_history.json keeps a reading around -- same convention and
+# same reasoning as D_ship_ais.py's HISTORY_RETENTION_MINUTES: this is
+# STORAGE retention only, independent of how far back B_ireland_radar_
+# greyscale.py's own backlog of unrendered frames might reach
+HISTORY_RETENTION_MINUTES = 7 * 24 * 60   # 7 days
 
 # (value key, unit key) candidates, tried in order, for each metric --
 # see NOTE ON FIELD NAMES above. Confirmed against a real stationDetail
@@ -396,6 +408,36 @@ def _save_state(state):
         json.dump(state, f)
 
 
+def _load_history():
+    if not os.path.exists(HISTORY_PATH):
+        return []
+    try:
+        with open(HISTORY_PATH) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _append_history(status):
+    """Record this successful fetch in solis_history.json so
+    B_ireland_radar_greyscale.py can show the reading that was actually
+    current at a given radar frame's own timestamp, instead of always
+    stamping "whatever's current now" onto every frame -- the same problem
+    ship_history.json already solves for AIS (see solis_at() there).
+
+    Keeps every field solis_status.json has except "raw" and
+    "yesterday_debug_sample" -- both are large and only useful for
+    inspecting the single latest snapshot, not worth keeping per entry
+    across a week of 5-minute samples."""
+    record = {k: v for k, v in status.items() if k not in ("raw", "yesterday_debug_sample")}
+    history = _load_history()
+    history.append(record)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=HISTORY_RETENTION_MINUTES)
+    history = [r for r in history if dt.datetime.fromisoformat(r["fetched_at"]) >= cutoff]
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(history, f, separators=(",", ":"))
+
+
 def _wait_minutes_for(consecutive_failures):
     if not consecutive_failures:
         return MIN_FETCH_INTERVAL_MINUTES
@@ -522,6 +564,8 @@ def main():
 
     with open(STATUS_PATH, "w") as f:
         json.dump(status, f, indent=2)
+
+    _append_history(status)
 
     state["consecutive_failures"] = 0
     _save_state(state)
