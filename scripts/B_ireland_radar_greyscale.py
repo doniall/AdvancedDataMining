@@ -237,7 +237,16 @@ def ships_at(history, at_time):
             (s for s in samples if window_start <= dt.datetime.fromisoformat(s["t"]) < now_t),
             key=lambda s: s["t"],
         )
-        trail = [{"lat": s["lat"], "lon": s["lon"]} for s in prior[-SHIP_TRAIL_MAX_POINTS:]]
+        # each trail point carries its own age (not just the ship's overall
+        # one above) so the trail can fade out section by section as it gets
+        # older, the same way the ship's own mark fades with age_minutes
+        trail = [
+            {
+                "lat": s["lat"], "lon": s["lon"],
+                "age_minutes": (at_time - dt.datetime.fromisoformat(s["t"])).total_seconds() / 60,
+            }
+            for s in prior[-SHIP_TRAIL_MAX_POINTS:]
+        ]
 
         out.append({
             "lat": now_s["lat"], "lon": now_s["lon"],
@@ -705,8 +714,19 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
         trail = ship.get("trail") or []
         if trail:
             pts = [ll2r(p["lon"], p["lat"]) for p in trail] + [(x, y)]
-            d.line(pts, fill=SHIP_HALO, width=3, joint="curve")
-            d.line(pts, fill=SHIP_MARK, width=1, joint="curve")
+            d.line(pts, fill=SHIP_HALO, width=3, joint="curve")   # halo backing -- already
+                                                                   # background-colored, so it
+                                                                   # doesn't need to fade per-segment
+            # each segment fades by the age of its older (trailing) end, same
+            # formula as the ship mark's own age fade below -- so the trail
+            # lightens smoothly section by section the further back it goes,
+            # and its newest segment (into the current position) ends at
+            # exactly the mark's own fade level, not a mismatched fixed color
+            ages = [p["age_minutes"] for p in trail] + [ship.get("age_minutes", 0)]
+            for i in range(len(pts) - 1):
+                seg_frac = min(max(ages[i] / SHIP_MAX_AGE_MINUTES, 0), 1)
+                seg_fill = round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK))
+                d.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
 
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
