@@ -100,20 +100,18 @@ USER_STATION_LIST_PATH = "/v1/api/userStationList"
 STATION_DETAIL_PATH = "/v1/api/stationDetail"
 STATION_DAY_PATH = "/v1/api/stationDay"
 
-# don't hit the API more often than this when things are healthy --
-# SolisCloud enforces its own rate limits, and inverter output doesn't
-# change fast enough to need a fresh pull every time
-# 0_Run_Radar_And_Greyscale.py fires. See BACKOFF_SCHEDULE_MINUTES below for
-# what happens when it's NOT healthy.
-MIN_FETCH_INTERVAL_MINUTES = 5
+# a healthy run has no minimum interval of its own -- SolisCloud enforces
+# its own rate limits, and how often this gets called at all is governed by
+# how often 0_Run_Radar_And_Greyscale.py itself runs. Only a run of
+# consecutive failures throttles further attempts, via BACKOFF_SCHEDULE_MINUTES
+# below.
 
 # after N consecutive failed attempts (network timeout, 502, or Solis's own
-# "try again later"), wait this many minutes before trying again, instead of
-# the normal MIN_FETCH_INTERVAL_MINUTES -- during a sustained outage every
-# attempt still costs up to REQUEST_TIMEOUT_SECONDS * (REQUEST_RETRIES + 1),
-# and without this a pipeline firing every few minutes would eat that cost
-# on every single cycle for as long as Solis stays down. Index = consecutive
-# failures so far, clamped to the last entry.
+# "try again later"), wait this many minutes before trying again -- during a
+# sustained outage every attempt still costs up to REQUEST_TIMEOUT_SECONDS *
+# (REQUEST_RETRIES + 1), and without this a pipeline firing every few minutes
+# would eat that cost on every single cycle for as long as Solis stays down.
+# Index = consecutive failures so far, clamped to the last entry.
 BACKOFF_SCHEDULE_MINUTES = [5, 10, 20, 40, 60]
 
 # SolisCloud's authenticated endpoints (stationDetail/inverterDetail
@@ -440,16 +438,17 @@ def _append_history(status):
         json.dump(history, f, separators=(",", ":"))
 
 
-def _wait_minutes_for(consecutive_failures):
-    if not consecutive_failures:
-        return MIN_FETCH_INTERVAL_MINUTES
+def _backoff_wait_minutes(consecutive_failures):
     return BACKOFF_SCHEDULE_MINUTES[min(consecutive_failures, len(BACKOFF_SCHEDULE_MINUTES)) - 1]
 
 
 def _due(state):
-    if not state.get("last_attempt_at"):
+    """A healthy state (no consecutive failures) is always due -- only a
+    run of failures throttles further attempts, via BACKOFF_SCHEDULE_MINUTES."""
+    consecutive_failures = state.get("consecutive_failures", 0)
+    if not consecutive_failures or not state.get("last_attempt_at"):
         return True
-    wait_minutes = _wait_minutes_for(state.get("consecutive_failures", 0))
+    wait_minutes = _backoff_wait_minutes(consecutive_failures)
     last_attempt = dt.datetime.fromisoformat(state["last_attempt_at"])
     age_minutes = (dt.datetime.now(dt.timezone.utc) - last_attempt).total_seconds() / 60
     return age_minutes >= wait_minutes
@@ -463,9 +462,9 @@ def main():
 
     state = _load_state()
     if not _due(state):
-        wait_minutes = _wait_minutes_for(state.get("consecutive_failures", 0))
-        print(f"last SolisCloud attempt was under {wait_minutes} min ago "
-              f"(consecutive failures: {state.get('consecutive_failures', 0)}) -- skipping")
+        wait_minutes = _backoff_wait_minutes(state.get("consecutive_failures", 0))
+        print(f"last SolisCloud attempt failed {state.get('consecutive_failures', 0)}x in a row; "
+              f"waiting {wait_minutes} min before retrying -- skipping this run")
         return
 
     state["last_attempt_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -481,7 +480,7 @@ def main():
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError, KeyError) as e:
         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
         _save_state(state)
-        next_wait = _wait_minutes_for(state["consecutive_failures"])
+        next_wait = _backoff_wait_minutes(state["consecutive_failures"])
         print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place "
               f"(consecutive failures: {state['consecutive_failures']}, next attempt in {next_wait} min)")
         return
