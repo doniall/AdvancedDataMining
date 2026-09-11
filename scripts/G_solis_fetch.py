@@ -132,11 +132,19 @@ REQUEST_RETRY_DELAY_SECONDS = 5
 # see "Yesterday" note above
 DAY_ENERGY_IS_CUMULATIVE = True
 
+# confirmed against a real capture: stationDay's produceEnergy/consumeEnergy
+# came back as 7019.0 / 6146.0 for a single day -- implausible as kWh (would
+# be a small industrial site, not a home system) but exactly right as Wh
+# (7.019 / 6.146 kWh), unlike stationDetail's fields which are already in
+# kWh. So this endpoint's day totals get divided by 1000 before use.
+DAY_ENERGY_IS_WH = True
+
 # a single day's production/consumption/export from a residential system
 # can't plausibly exceed this -- comfortably above what even a large (~20kWp)
 # home system produces on its best day. Guards fetch_day_totals() against a
-# units mismatch on the (unconfirmed) stationDay endpoint silently showing a
-# wrong-order-of-magnitude number instead of a missing one.
+# units mismatch on the stationDay endpoint silently showing a
+# wrong-order-of-magnitude number instead of a missing one -- checked after
+# the Wh->kWh conversion above, so it still catches any other mismatch.
 DAY_TOTAL_SANITY_CEILING_KWH = 200
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -345,11 +353,10 @@ def fetch_day_totals(station_id, date_str):
     Returns (produce_kwh, consume_kwh, export_kwh, debug_sample) -- the last
     is a couple of raw records as returned by SolisCloud, unmodified, kept
     only so a bad reading can be diagnosed from solis_status.json instead of
-    needing a live capture from the account. This endpoint's exact record
-    shape (units especially -- possibly Wh, not kWh, unlike stationDetail's
-    already-converted fields) isn't confirmed, so DAY_TOTAL_SANITY_CEILING_KWH
-    below guards against ever displaying a wrong-order-of-magnitude number
-    from a units mismatch here."""
+    needing a live capture from the account. This endpoint's records are in
+    Wh, not kWh like stationDetail's already-converted fields -- see
+    DAY_ENERGY_IS_WH above -- and DAY_TOTAL_SANITY_CEILING_KWH still guards
+    against any further units mismatch after that conversion."""
     try:
         resp = _call(STATION_DAY_PATH, {"id": station_id, "money": MONEY_CODE, "timezone": 0, "time": date_str})
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
@@ -366,10 +373,12 @@ def fetch_day_totals(station_id, date_str):
             if not values:
                 continue
             result = max(values) if DAY_ENERGY_IS_CUMULATIVE else sum(values)
+            if DAY_ENERGY_IS_WH:
+                result /= 1000
             if result > DAY_TOTAL_SANITY_CEILING_KWH:
-                print(f"stationDay {label} ({key}={result}) exceeds the {DAY_TOTAL_SANITY_CEILING_KWH} kWh "
-                      "sanity ceiling for one day -- likely a units mismatch (Wh vs kWh?) on this endpoint, "
-                      "discarding rather than showing a wrong number. See debug_sample in solis_status.json.")
+                print(f"stationDay {label} ({key}={result} kWh after Wh->kWh conversion) exceeds the "
+                      f"{DAY_TOTAL_SANITY_CEILING_KWH} kWh sanity ceiling for one day -- discarding rather "
+                      "than showing a wrong number. See debug_sample in solis_status.json.")
                 return None
             return result
         return None
