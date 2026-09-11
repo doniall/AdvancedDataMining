@@ -4,14 +4,9 @@ H_sensecraft_push.py
 
 Pushes the latest Solis snapshot (solis_device.json, written by
 G_solis_fetch.py) AND the latest IMAGE_PUSH_COUNT rendered greyscale radar
-frames (1_GreyscalePNG/, written by B_ireland_radar_greyscale.py) straight
-to SenseCraft's own cloud API, instead of relying on the E1003's
+frames (1_GreyscalePNG/, written by B_ireland_radar_greyscale.py) to
+SenseCraft's own cloud API, instead of relying on the E1003's
 "External API Configuration" widget to pull either from somewhere we host.
-Push doesn't need solis_device.json or the greyscale PNGs to sit anywhere
-internet-reachable at a stable URL; push doesn't -- whatever machine runs
-this pipeline (this laptop, a Pi, a GitHub Action) just POSTs the data to
-SenseCraft directly, and the device fetches its widget data from
-SenseCraft's own servers instead of from us.
 
 SETUP
     In the SenseCraft HMI dashboard designer, add the widget and choose
@@ -23,44 +18,45 @@ SETUP
     "Test & Load Fields" button to pick which pushed fields each widget
     should display -- Solis numbers (power_kw, battery_pct,
     weather_condition, ...) as text/number fields, image_1..image_N as
-    image fields (the dashboard lets a pushed field be categorised as
-    either).
+    Image-type fields (Format Type "Image URL" -- see IMAGES below).
 
     SenseCraft's own `data` object is a flat key/value map (their own
     example: temperature/humidity/pressure) -- it isn't documented as
     supporting nested objects, so solis_device.json's nested "weather"
     dict is flattened to weather_* keys below rather than sent as-is.
 
-IMAGES -- UNCONFIRMED FORMAT
-    The dashboard has an image widget and lets a pushed field be tagged as
-    an image, but there's no reachable documentation (sensecraft-hmi-docs.
-    seeed.cc and wiki.seeedstudio.com are both blocked from where this was
-    written) confirming what a pushed image VALUE needs to look like --
-    plain base64, or a data: URI. This defaults to plain base64
-    (IMAGE_AS_DATA_URI = False below); if the widget doesn't render after
-    a real push, flip that flag and try again -- that's the one thing to
-    change, nothing else about the field layout.
+IMAGES -- WHY THESE ARE URLS, NOT PUSHED BYTES
+    Confirmed live in the dashboard: an Image-type field's only Format Type
+    is "Image URL" -- there's no base64/inline-bytes option. So a pushed
+    image_N field has to be an actual fetchable URL; push_data doesn't let
+    us skip hosting for images the way it does for the plain Solis numbers.
 
-    Field names are stable across pushes -- image_1 (most recent) through
-    image_N (oldest of the N kept) -- so a widget bound to e.g. image_1 in
-    the dashboard keeps working every run; only the values rotate as new
-    frames replace old ones. image_N_time is that frame's own UTC
-    timestamp (parsed from its filename), for confirming freshness.
+    _publish_images_to_github() covers that: it commits the latest
+    IMAGE_PUSH_COUNT greyscale frames under fixed filenames
+    (frame_1.png..frame_N.png, newest first) to a dedicated branch
+    (IMAGE_BRANCH) of this repo's own origin remote, via a throwaway git
+    worktree -- never touches whatever branch is actually checked out for
+    development. Fixed filenames mean the resulting
+    raw.githubusercontent.com URLs never change, only what they point to --
+    so image_N fields, once selected in the dashboard, keep working across
+    every push. Requires this repo to be public (raw.githubusercontent.com
+    serves private repos' files only with an auth token, which the
+    SenseCraft-side fetch has no way to supply) and that the pipeline's own
+    git push access covers this repo's origin remote.
 
-    Full E1003-resolution PNGs (1872x1404) run several hundred KB each, so
-    IMAGE_PUSH_COUNT of them base64-encoded into one POST can be multiple
-    MB. SenseCraft doesn't document a size limit for push_data, so
-    MAX_PUSH_PAYLOAD_WARN_BYTES below is a log-only tripwire, not a hard
-    cap -- if a push actually gets rejected for size, lower
-    IMAGE_PUSH_COUNT.
+    image_N_time is that frame's own UTC timestamp (parsed from its
+    filename), for confirming freshness against image_N itself.
 
 Run:   python3 H_sensecraft_push.py
-Needs: nothing beyond the standard library.
+Needs: nothing beyond the standard library, and `git` on PATH with push
+       access to this repo's origin remote already configured.
 """
 
-import base64
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -79,8 +75,8 @@ GREYSCALE_DIR = os.path.join(HERE, "1_GreyscalePNG")
 LAST_PUSHED_PATH = os.path.join(HERE, "sensecraft_last_pushed.json")
 
 IMAGE_PUSH_COUNT = 20
-IMAGE_AS_DATA_URI = False   # see IMAGES -- UNCONFIRMED FORMAT above
-MAX_PUSH_PAYLOAD_WARN_BYTES = 4 * 1024 * 1024
+GIT_REMOTE = "origin"
+IMAGE_BRANCH = os.environ.get("SENSECRAFT_IMAGE_BRANCH", "sensecraft-images")
 
 
 def _flatten(device_view):
@@ -111,24 +107,92 @@ def _latest_greyscale_filenames(n=IMAGE_PUSH_COUNT):
     return list(reversed(names[-n:]))
 
 
-def _encode_image(path):
-    with open(path, "rb") as f:
-        raw = f.read()
-    b64 = base64.b64encode(raw).decode("ascii")
-    return f"data:image/png;base64,{b64}" if IMAGE_AS_DATA_URI else b64
+def _run(args, cwd, check=True):
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
 
 
-def _image_fields(filenames):
-    """Builds image_1.._N (+ _time) fields -- see IMAGES -- UNCONFIRMED
-    FORMAT above for the field-naming and encoding rationale."""
+def _repo_root():
+    return _run(["git", "rev-parse", "--show-toplevel"], cwd=HERE).stdout.strip()
+
+
+def _origin_owner_repo():
+    """Parses 'owner/repo' out of the origin remote URL, for building
+    raw.githubusercontent.com URLs -- handles both the SSH
+    (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git)
+    remote forms."""
+    url = _run(["git", "remote", "get-url", GIT_REMOTE], cwd=HERE).stdout.strip()
+    if url.endswith(".git"):
+        url = url[:-len(".git")]
+    if url.startswith("git@github.com:"):
+        return url[len("git@github.com:"):]
+    if "github.com/" in url:
+        return url.split("github.com/", 1)[1]
+    raise RuntimeError(f"origin remote {url!r} doesn't look like a GitHub URL")
+
+
+def _publish_images_to_github(filenames):
+    """Commits `filenames` (from GREYSCALE_DIR, newest first) to fixed
+    names (frame_1.png..frame_N.png) on IMAGE_BRANCH of this repo's origin
+    remote, and returns their raw.githubusercontent.com URLs in the same
+    order -- or None on any failure (git not pushable from here, network,
+    etc.), so main() can skip image fields for this run instead of crashing
+    the whole push. See IMAGES docstring above for why this exists."""
+    if not filenames:
+        return []
+
+    try:
+        repo_root = _repo_root()
+        owner_repo = _origin_owner_repo()
+    except (subprocess.CalledProcessError, RuntimeError) as e:
+        print(f"couldn't resolve this repo's git remote ({e}); skipping GitHub image publish")
+        return None
+
+    _run(["git", "fetch", GIT_REMOTE, IMAGE_BRANCH], cwd=repo_root, check=False)
+    # ^ best-effort -- IMAGE_BRANCH may not exist on the remote yet (first run ever)
+
+    tmp_dir = tempfile.mkdtemp(prefix="sensecraft_images_")
+    try:
+        existing = _run(["git", "worktree", "add", tmp_dir, IMAGE_BRANCH], cwd=repo_root, check=False)
+        if existing.returncode != 0:
+            # IMAGE_BRANCH doesn't exist locally or on the remote yet -- start it fresh,
+            # as an orphan branch with no history and no files from whatever HEAD is
+            _run(["git", "worktree", "add", "--detach", "--no-checkout", tmp_dir], cwd=repo_root)
+            _run(["git", "checkout", "--orphan", IMAGE_BRANCH], cwd=tmp_dir)
+            _run(["git", "reset"], cwd=tmp_dir)   # clear the index; the (already-empty) working tree is untouched
+
+        for old in os.listdir(tmp_dir):
+            if old.lower().endswith(".png"):
+                os.remove(os.path.join(tmp_dir, old))
+        for i, filename in enumerate(filenames, start=1):
+            shutil.copyfile(os.path.join(GREYSCALE_DIR, filename), os.path.join(tmp_dir, f"frame_{i}.png"))
+
+        _run(["git", "add", "-A"], cwd=tmp_dir)
+        status = _run(["git", "status", "--porcelain"], cwd=tmp_dir)
+        if status.stdout.strip():
+            _run(["git", "-c", "user.email=solis-pipeline@localhost", "-c", "user.name=Solis Pipeline",
+                  "commit", "-q", "-m", f"latest {len(filenames)} greyscale frame(s)"], cwd=tmp_dir)
+            _run(["git", "push", "-q", GIT_REMOTE, f"HEAD:{IMAGE_BRANCH}"], cwd=tmp_dir)
+        else:
+            print(f"{IMAGE_BRANCH} already has this exact frame set -- nothing to commit")
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        print(f"publishing images to GitHub failed ({e}); {stderr}")
+        return None
+    finally:
+        _run(["git", "worktree", "remove", "--force", tmp_dir], cwd=repo_root, check=False)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        _run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+
+    return [
+        f"https://raw.githubusercontent.com/{owner_repo}/{IMAGE_BRANCH}/frame_{i}.png"
+        for i in range(1, len(filenames) + 1)
+    ]
+
+
+def _image_fields(urls, filenames):
     fields = {}
-    for i, filename in enumerate(filenames, start=1):
-        path = os.path.join(GREYSCALE_DIR, filename)
-        try:
-            fields[f"image_{i}"] = _encode_image(path)
-        except OSError as e:
-            print(f"couldn't read {filename} for SenseCraft push ({e}); skipping it")
-            continue
+    for i, (url, filename) in enumerate(zip(urls, filenames), start=1):
+        fields[f"image_{i}"] = url
         fields[f"image_{i}_time"] = os.path.splitext(filename)[0]
     return fields
 
@@ -191,14 +255,13 @@ def main():
         print("SenseCraft already has this data (nothing new since the last push) -- skipping")
         return
 
-    data = _flatten(device_view)
-    data.update(_image_fields(image_filenames))
+    image_urls = _publish_images_to_github(image_filenames) if image_filenames else []
+    if image_urls is None:
+        print("couldn't publish images to GitHub this run -- pushing Solis data without image fields")
+        image_urls, image_filenames = [], []
 
-    payload_size = len(json.dumps(data))
-    if payload_size > MAX_PUSH_PAYLOAD_WARN_BYTES:
-        print(f"warning: this push is {payload_size / 1024 / 1024:.1f} MB -- SenseCraft doesn't "
-              "document a size limit for push_data, so this may get rejected. Lower IMAGE_PUSH_COUNT "
-              "if it does.")
+    data = _flatten(device_view)
+    data.update(_image_fields(image_urls, image_filenames))
 
     try:
         resp = push(data)
