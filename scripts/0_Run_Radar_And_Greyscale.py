@@ -1,0 +1,48 @@
+import A_met_radar_probe
+import B_ireland_radar_greyscale
+import E_fetch_ship_history
+import F_ensure_vm_running
+import G_solis_fetch
+import H_sensecraft_push
+
+#A_met_radar_probe
+
+print("Gathering Met Éireann's rainfall radar snapshots")
+try:
+    A_met_radar_probe.main()
+except Exception as e:
+    print(f"Met Éireann radar fetch failed ({e})")
+
+
+print("Checking the AIS VM is running")
+try:
+    F_ensure_vm_running.main()
+except Exception as e:
+    print(f"VM power check failed ({e})")
+
+print("Fetching AIS ship history from the Azure VM")
+try:
+    E_fetch_ship_history.main()
+except Exception as e:
+    print(f"ship history fetch failed ({e}); rendering with whatever's already on disk")
+
+print("Fetching SolisCloud solar status")
+try:
+    G_solis_fetch.main()
+except Exception as e:
+    print(f"SolisCloud fetch failed ({e}); rendering with whatever's already on disk")
+
+print("Pushing SolisCloud status to SenseCraft")
+try:
+    H_sensecraft_push.main()
+except Exception as e:
+    print(f"SenseCraft push failed ({e})")
+
+print("Starting Greyscale")
+B_ireland_radar_greyscale.VIEW = "landscape"
+try:
+    B_ireland_radar_greyscale.main()
+except Exception as e:
+    print(f"Greyscale production failed ({e})")
+
+print("Goodbye!")

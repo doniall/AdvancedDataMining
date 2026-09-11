@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+scripts/ship_history.json
+scripts/ship_ais_last_fetch.txt
+scripts/clutter_debug.png
