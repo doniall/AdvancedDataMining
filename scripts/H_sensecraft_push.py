@@ -157,6 +157,16 @@ def _publish_images_to_github(filenames):
         print(f"couldn't resolve this repo's git remote ({e}); skipping GitHub image publish")
         return None
 
+    # http.postBuffer is a repo-level (not worktree-level) setting, so this
+    # persists in the shared .git/config across every future run -- not just
+    # this one -- and works the same on any machine this ends up running on
+    # (this Mac, a Pi later) without needing a one-off manual `git config`
+    # first. Git's own default (1 MiB) is comfortably too small for a first
+    # push of IMAGE_PUSH_COUNT real images in one commit, and fails with an
+    # opaque "unexpected disconnect while reading sideband packet" rather
+    # than a clear size-limit error.
+    _run(["git", "config", "http.postBuffer", "524288000"], cwd=repo_root, check=False)
+
     _run(["git", "fetch", GIT_REMOTE, IMAGE_BRANCH], cwd=repo_root, check=False)
     # ^ best-effort -- IMAGE_BRANCH may not exist on the remote yet (first run ever)
 
