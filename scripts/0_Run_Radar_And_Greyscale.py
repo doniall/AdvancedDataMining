@@ -2,6 +2,8 @@ import A_met_radar_probe
 import B_ireland_radar_greyscale
 import E_fetch_ship_history
 import F_ensure_vm_running
+import G_solis_fetch
+import H_sensecraft_push
 
 #A_met_radar_probe
 
@@ -23,6 +25,18 @@ try:
     E_fetch_ship_history.main()
 except Exception as e:
     print(f"ship history fetch failed ({e}); rendering with whatever's already on disk")
+
+print("Fetching SolisCloud solar status")
+try:
+    G_solis_fetch.main()
+except Exception as e:
+    print(f"SolisCloud fetch failed ({e}); rendering with whatever's already on disk")
+
+print("Pushing SolisCloud status to SenseCraft")
+try:
+    H_sensecraft_push.main()
+except Exception as e:
+    print(f"SenseCraft push failed ({e})")
 
 print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"

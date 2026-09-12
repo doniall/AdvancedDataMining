@@ -35,15 +35,22 @@ NOTE
 import os, sys, io, json, math, datetime as dt
 from zoneinfo import ZoneInfo
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 import A_met_radar_probe as radar_probe
 
 # ===================== EDIT THESE =====================
-LOCATION_LAT = 53.3498      # your home latitude   (default: Dublin)
-LOCATION_LON = -6.2603      # your home longitude
+LOCATION_LAT = 52.6175      # your home latitude   (Kildimo, Co. Limerick)
+LOCATION_LON = -8.8094      # your home longitude
 VIEW         = "portrait"   # "portrait"  = Ireland fills the frame (Atlantic margin)
                             # "landscape" = full Met Eireann extent, out to Wales
+
+SHOW_SOLIS_STRIP = True     # reserve a vertical strip for SolisCloud stats,
+                            # carved out of the map's own width rather than
+                            # added on top of the fixed device resolution
+SOLIS_STRIP_WIDTH = 320     # px, taken off the right edge of the canvas
+GRID_POSITIVE_MEANS_EXPORT = True     # flip if your account's grid power sign is reversed -- see G_solis_fetch.py
+BATTERY_POSITIVE_MEANS_CHARGING = True   # flip if your account's battery power sign is reversed -- see G_solis_fetch.py
 # ======================================================
 
 # --- tile-grid projection (exact; derived from A_met_radar_probe's tile grid) ---
@@ -92,12 +99,16 @@ BACKGROUND_RGB       = np.array([71, 112, 76], float)
 BACKGROUND_TOLERANCE = 30
 
 # some tiles (seen at the NE edge of the fetched grid, likely a different
-# upstream source stitched into the same mosaic) render their own
-# dry-but-in-range background as near-black instead of the olive above --
-# same meaning (radar coverage, no rain), just a different colour
-# convention. RAMP's darkest rain colour still has a max channel of 190,
-# comfortably clear of this, so it can't swallow real heavy rain.
-BLACK_BACKGROUND_TOLERANCE = 40
+# upstream source stitched into the same mosaic, and also at a UK-radar
+# inset panel further south) render their own dry-but-in-range background
+# as near-black instead of the olive above -- same meaning (radar
+# coverage, no rain), just a different colour convention. Even the closest
+# real RAMP colour sits 207 RGB units from pure black (see conversation
+# history for the check), so this has enormous headroom -- widened from an
+# original 40, which was too tight to reliably catch this convention's
+# actual shade (likely a not-quite-pure black from compression/blending)
+# and let a whole inset panel get misread as rain-adjacent background.
+BLACK_BACKGROUND_TOLERANCE = 100
 
 GREY = {i+1: v for i, v in enumerate(
     [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
@@ -146,6 +157,7 @@ def load_counties():
         return [np.array(r, float) for r in json.load(f)]
 
 SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
+SOLIS_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solis_history.json")
 
 # how a ship's "now" position and trail are picked out of its recorded
 # history, relative to the timestamp of the frame being rendered (not
@@ -162,12 +174,20 @@ SHIP_MAX_AGE_MINUTES = 120         # how much of a ship's history D_ship_ais.py'
                                     # 15-min minimum cadence plus normal coverage gaps
                                     # means "no sample in the last 20 min" was the common
                                     # case, not the exception, before this was raised)
-SHIP_TRAIL_MAX_POINTS = 5          # up to this many of the ship's most recent
-                                    # PRIOR records, drawn as an actual path
-SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its own
-                                    # most recent record -- same "last 2h mapped" rule
-                                    # as SHIP_MAX_AGE_MINUTES, kept as its own constant
-                                    # in case the two ever need to diverge
+SHIP_TRAIL_MAX_POINTS = 500         # effectively unbounded -- SHIP_TRAIL_WINDOW_MINUTES
+                                    # below is the real limit on how much trail shows;
+                                    # capping the point COUNT on top of that would just
+                                    # thin out an otherwise-faithful path for no reason
+SHIP_TRAIL_WINDOW_MINUTES = 24*60   # how far back a SHOWN ship's trail reaches --
+                                    # deliberately much longer than SHIP_MAX_AGE_MINUTES:
+                                    # a ship still needs to have been seen within the last
+                                    # 2h to show AT ALL, but once it's shown, its trail
+                                    # reaches back a full day, not just those same 2h
+SHIP_TRAIL_FADE_MINUTES = SHIP_TRAIL_WINDOW_MINUTES   # trail segments fade out over their
+                                    # own full window, not SHIP_MAX_AGE_MINUTES -- using the
+                                    # mark's much shorter 2h fade here would leave every
+                                    # segment older than 2h already fully faded to
+                                    # invisible, defeating the point of a 24h trail
 
 
 def load_ship_history():
@@ -179,24 +199,60 @@ def load_ship_history():
         return json.load(f)
 
 
-def _sample_at_or_before(samples, target):
-    """The latest sample at or before `target`, or None if the ship has no
-    samples that old yet. Deliberately NOT "whichever sample is closest" --
+def load_solis_history():
+    """Every successful reading G_solis_fetch.py has recorded -- [] (no solar
+    block) if that script hasn't been run yet, so drawing it is entirely
+    optional. A list, not keyed like ship_history.json, since there's only
+    ever one Solis account/station here."""
+    if not os.path.exists(SOLIS_HISTORY_PATH):
+        return []
+    with open(SOLIS_HISTORY_PATH) as f:
+        return json.load(f)
+
+
+def _sample_at_or_before(samples, target, time_key="t"):
+    """The latest sample at or before `target`, or None if there's no
+    sample that old yet. Deliberately NOT "whichever sample is closest" --
     that flips between two samples right at their midpoint, so on a
     sequence of frames a few minutes apart (Met Eireann's own 5-min radar
-    cadence, much tighter than AIS's ~15-20 min sample spacing) a ship's
-    position and trail would jump discontinuously mid-sequence purely
-    because a later sample became slightly nearer than an earlier one, with
-    nothing in the actual ship movement to justify it. Picking "latest at
-    or before" instead is monotonic as at_time advances through a frame
-    sequence: a ship holds its position, then steps forward exactly once
-    when new data becomes available, and never regresses to an older
-    sample or jumps ahead into what is, relative to that frame, the
-    future."""
-    candidates = [s for s in samples if dt.datetime.fromisoformat(s["t"]) <= target]
+    cadence, much tighter than AIS's ~15-20 min sample spacing, or Solis's
+    own ~5 min fetch cadence) a ship's position, or the solar reading shown
+    alongside it, would jump discontinuously mid-sequence purely because a
+    later sample became slightly nearer than an earlier one, with nothing
+    in the actual ship movement or solar output to justify it. Picking
+    "latest at or before" instead is monotonic as at_time advances through
+    a frame sequence: a value holds, then steps forward exactly once when
+    new data becomes available, and never regresses to an older sample or
+    jumps ahead into what is, relative to that frame, the future."""
+    candidates = [s for s in samples if dt.datetime.fromisoformat(s[time_key]) <= target]
     if not candidates:
         return None
-    return max(candidates, key=lambda s: s["t"])
+    return max(candidates, key=lambda s: s[time_key])
+
+
+def solis_at(history, at_time):
+    """The Solis reading closest in time to at_time -- so a backlog of radar
+    frames each show the solar data as it actually was then, instead of all
+    showing today's living reading stamped onto every one of them (the same
+    problem ships_at() solves for AIS). None only if there's no history at
+    all yet.
+
+    Deliberately NOT _sample_at_or_before()'s strict "latest at-or-before"
+    rule, even though that's exactly right for ships: a ship's future
+    position genuinely isn't knowable yet, so showing it early would be
+    fabricating data that didn't exist at that frame's time. A Solis
+    reading doesn't have that problem on a live run -- 0_Run_Radar_And_
+    Greyscale.py fetches the radar frame first and Solis a little later in
+    the same cycle, and Met Eireann's own publish lag routinely leaves the
+    frame's own timestamp a few minutes behind "now" while G_solis_fetch.py's
+    fetched_at reflects "now" -- so the just-fetched reading is almost
+    always a few minutes "after" the frame it's meant to accompany. That's
+    not future data, just a different-latency source; requiring strictly-
+    before excluded the very reading fetched for that render, every time,
+    leaving the panel blank on every live run."""
+    if not history:
+        return None
+    return min(history, key=lambda r: abs((dt.datetime.fromisoformat(r["fetched_at"]) - at_time).total_seconds()))
 
 
 def ships_at(history, at_time):
@@ -220,7 +276,16 @@ def ships_at(history, at_time):
             (s for s in samples if window_start <= dt.datetime.fromisoformat(s["t"]) < now_t),
             key=lambda s: s["t"],
         )
-        trail = [{"lat": s["lat"], "lon": s["lon"]} for s in prior[-SHIP_TRAIL_MAX_POINTS:]]
+        # each trail point carries its own age (not just the ship's overall
+        # one above) so the trail can fade out section by section as it gets
+        # older, the same way the ship's own mark fades with age_minutes
+        trail = [
+            {
+                "lat": s["lat"], "lon": s["lon"],
+                "age_minutes": (at_time - dt.datetime.fromisoformat(s["t"])).total_seconds() / 60,
+            }
+            for s in prior[-SHIP_TRAIL_MAX_POINTS:]
+        ]
 
         out.append({
             "lat": now_s["lat"], "lon": now_s["lon"],
@@ -257,10 +322,19 @@ def classify(r, g, b):
     lvl = np.zeros(r.shape, int)
     lvl[rain] = idx + 1
 
+    # fills small anti-aliasing gaps INSIDE a rain blob (pixels that fell just
+    # under the sat/mx threshold at a colour-band edge but are clearly
+    # surrounded by real rain) -- must exclude is_background() too, not just
+    # lvl==0, or a large uniform background region (olive OR the black
+    # variant) sitting next to a real rain cluster gets slowly eaten into by
+    # this over repeated passes, since nothing else marks it "background,
+    # not a gap." That's what was turning a black no-data inset into fake
+    # heavy rain in the output.
+    not_bg = ~is_background(r, g, b)
     from PIL import ImageFilter
     for _ in range(5):
         med = np.asarray(Image.fromarray(lvl.astype(np.uint8)).filter(ImageFilter.MedianFilter(5)))
-        gap = (lvl == 0) & (med > 0)
+        gap = (lvl == 0) & (med > 0) & not_bg
         lvl[gap] = med[gap]
 
     return lvl
@@ -454,9 +528,22 @@ def _draw_ship(d, x, y, direction_deg, mark_fill=SHIP_MARK):
 def fill_black(A, thresh=95, max_iter=16):
     """Replace any near-black pixels (tile-stitch seams, if any) with the average
     of the nearest non-black pixels, so rain reads continuous across them.
-    A is an HxWx3 float array; returns the same, filled."""
+    A is an HxWx3 float array; returns the same, filled.
+
+    Deliberate near-black background (is_background()'s own black check --
+    some tiles use it as the same "dry, in range" convention olive means
+    elsewhere) is excluded from that fill, exactly like olive already is
+    (olive's max channel, 112, already clears `thresh` on its own). Without
+    this, a large solid-black region -- e.g. a whole inset panel, not a
+    thin seam -- gets its border eaten into and blended with whatever real
+    rain sits next to it, since nothing here distinguishes "a couple of
+    stitch-seam pixels" from "a big deliberate black area." Only a
+    non-trivial max_iter can reach more than a thin border either way, so a
+    large black area's own interior was already safe -- this closes the
+    border case."""
     A = A.astype(np.float32); H, W, _ = A.shape
-    known = A.max(2) >= thresh          # True = keep; False = black line to fill
+    known = (A.max(2) >= thresh) | is_background(A[:, :, 0], A[:, :, 1], A[:, :, 2])
+                                         # True = keep; False = black line to fill
     out = A.copy(); out[~known] = 0.0
     kn = known.astype(np.float32)
     for _ in range(max_iter):
@@ -473,10 +560,19 @@ def fill_black(A, thresh=95, max_iter=16):
         known |= newly; kn = known.astype(np.float32); out[~known] = 0.0
     return np.clip(out, 0, 255)
 
+def canvas_size():
+    """Full physical device resolution for the chosen VIEW -- independent of
+    how much of that width the map itself gets, see build_window()."""
+    return (1872, 1404) if VIEW == "landscape" else (1404, 1872)
+
+
 def build_window():
-    """Return canvas size and the mercator view window for the chosen VIEW."""
+    """Return the MAP's pixel size (device canvas minus the Solis strip, if
+    enabled) and the mercator view window for the chosen VIEW."""
     if VIEW == "landscape":
-        W, H = 1872, 1404
+        W, H = canvas_size()
+        if SHOW_SOLIS_STRIP:
+            W -= SOLIS_STRIP_WIDTH
         lon_l = math.degrees((0 - BX) / S)
         lon_r = math.degrees((IMG_W - BX) / S)
         Xmn, Xmx = math.radians(lon_l), math.radians(lon_r)
@@ -487,7 +583,9 @@ def build_window():
         Wwin = Xmx - Xmn
         Hwin = Wwin / (W / H)                 # crop N/S to fill the landscape frame
     else:  # portrait: Ireland fills the frame, shifted west for the Atlantic approach
-        W, H = 1404, 1872
+        W, H = canvas_size()
+        if SHOW_SOLIS_STRIP:
+            W -= SOLIS_STRIP_WIDTH
         mnlon, mnlat, mxlon, mxlat = IRELAND_BOUNDS
         Xmn, Xmx = math.radians(mnlon), math.radians(mxlon)
         Ymn, Ymx = float(mercY(mnlat)), float(mercY(mxlat))
@@ -524,11 +622,132 @@ def build_window():
     return W, H, cx, cy, Wwin / 2, Hwin / 2, Wwin, Hwin
 
 
-def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
+def _fmt_stat(value, unit, decimals=2):
+    return f"{value:.{decimals}f} {unit}" if value is not None else f"-- {unit}"
+
+
+def _draw_solis_strip(d, x0, x1, H, solis):
+    """Vertical stats sidebar in the reserved strip [x0, x1) -- always drawn
+    (with placeholders if solis is None/incomplete) so the map's width
+    doesn't jump around between frames depending on whether a fetch
+    succeeded."""
+    solis = solis or {}
+    pad = 20
+    x = x0 + pad
+    y = 16
+
+    d.line([(x0, 0), (x0, H)], fill=COUNTY_LINE, width=1)
+
+    header_font = _load_font(20)
+    label_font = _load_font(15)
+    value_font = _load_font(30)
+
+    d.text((x, y), "SOLIS SOLAR", fill=COAST_LINE, font=header_font)
+    y += 26
+
+    fetched_at = solis.get("fetched_at")
+    if fetched_at:
+        local_t = dt.datetime.fromisoformat(fetched_at).astimezone(ZoneInfo("Europe/Dublin"))
+        as_of_str = f"reading as of {local_t.strftime('%H:%M')}"
+    else:
+        as_of_str = "reading as of --"
+    d.text((x, y), as_of_str, fill=COAST_LINE, font=label_font)
+    y += 30
+
+    def stat(label, value_str, y):
+        d.text((x, y), label, fill=COAST_LINE, font=label_font)
+        d.text((x, y + 19), value_str, fill=COAST_LINE, font=value_font)
+        return y + 72
+
+    y = stat("PV PRODUCTION NOW", _fmt_stat(solis.get("power_kw"), "kW"), y)
+    y = stat("CONSUMPTION NOW", _fmt_stat(solis.get("consumption_kw"), "kW"), y)
+
+    grid_kw = solis.get("grid_kw")
+    if grid_kw is None:
+        grid_label, grid_str = "GRID NOW", "--"
+    else:
+        exporting = (grid_kw >= 0) == GRID_POSITIVE_MEANS_EXPORT
+        grid_label = "EXPORTING TO GRID" if exporting else "IMPORTING FROM GRID"
+        grid_str = f"{abs(grid_kw):.2f} kW"
+    y = stat(grid_label, grid_str, y)
+
+    battery_pct = solis.get("battery_pct")
+    y = stat("BATTERY", f"{battery_pct:.0f} %" if battery_pct is not None else "-- %", y)
+
+    # a battery genuinely sits at (or within noise of) zero flow often --
+    # full, or no surplus/deficit to charge or drain -- so that's its own
+    # neutral state rather than being called "charging 0.00 kW"
+    battery_kw = solis.get("battery_kw")
+    BATTERY_IDLE_THRESHOLD_KW = 0.05
+    if battery_kw is None:
+        batt_label, batt_str = "BATTERY", "--"
+    elif abs(battery_kw) < BATTERY_IDLE_THRESHOLD_KW:
+        batt_label, batt_str = "BATTERY IDLE", "0.00 kW"
+    else:
+        charging = (battery_kw >= 0) == BATTERY_POSITIVE_MEANS_CHARGING
+        batt_label = "CHARGING BATTERY" if charging else "DISCHARGING BATTERY"
+        batt_str = f"{abs(battery_kw):.2f} kW"
+    y = stat(batt_label, batt_str, y)
+
+    y += 14
+    d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
+    y += 20
+
+    y = stat("PRODUCED TODAY", _fmt_stat(solis.get("today_kwh"), "kWh", 1), y)
+    y = stat("USED TODAY", _fmt_stat(solis.get("today_consumption_kwh"), "kWh", 1), y)
+    y = stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
+    y = stat("IMPORTED TODAY", _fmt_stat(solis.get("today_import_kwh"), "kWh", 1), y)
+
+    y += 14
+    d.line([(x, y), (x1 - pad, y)], fill=COUNTY_LINE, width=1)
+    y += 20
+
+    weather = solis.get("weather") or {}
+    d.text((x, y), "WEATHER AT SITE", fill=COAST_LINE, font=label_font)
+    y += 28
+    weather_font = _load_font(18)
+
+    def wline(label, value, y):
+        text = value if value not in (None, "") else "--"
+        d.text((x, y), f"{label}: {text}", fill=COAST_LINE, font=weather_font)
+        return y + 25
+
+    temp_min, temp_max = weather.get("temp_min"), weather.get("temp_max")
+    temp_str = f"{temp_min}–{temp_max}°C" if temp_min is not None and temp_max is not None else None
+    humidity = weather.get("humidity")
+    wind_speed, wind_dir = weather.get("wind_speed"), weather.get("wind_dir")
+    wind_str = " ".join(v for v in (wind_speed, wind_dir) if v) or None
+    pressure = weather.get("pressure")
+    pressure_str = f"{pressure} hPa" if pressure is not None else None
+    precip = weather.get("precip")
+    precip_str = f"{precip}%" if precip is not None else None
+    sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
+    sun_str = f"{sunrise} – {sunset}" if sunrise and sunset else None
+
+    y = wline("Condition", weather.get("condition"), y)
+    y = wline("Temp", temp_str, y)
+    y = wline("Humidity", f"{humidity}%" if humidity is not None else None, y)
+    y = wline("Wind", wind_str, y)
+    y = wline("Pressure", pressure_str, y)
+    y = wline("Precip", precip_str, y)
+    wline("Sun", sun_str, y)
+
+
+def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
               "the projection may be off." % (IMG_W, IMG_H, src.width, src.height))
+
+    # collapse the black background convention into literally the same pixel
+    # value as the olive one, up front -- rather than teaching every later
+    # step (fill_black, classify, is_background's own callers) to treat
+    # black as a special case alongside olive, this makes black simply STOP
+    # EXISTING as a distinct colour before any of them run. Whatever used to
+    # be near-black reads as ordinary olive background from here on, with
+    # no separate code path left to get out of sync.
+    black_bg = (A ** 2).sum(2) < BLACK_BACKGROUND_TOLERANCE ** 2
+    A[black_bg] = BACKGROUND_RGB
 
     A = fill_black(A)
 
@@ -567,6 +786,37 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
     for ring in rings_Coast:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
 
+    # trails and marks are drawn in separate passes below, not interleaved
+    # per ship, so a later ship's trail can never cover an earlier ship's
+    # own mark -- with independent ships potentially close together, z-order
+    # by loop position was otherwise arbitrary. Marks are collected here and
+    # drawn last, on top of every trail.
+    mark_draws = []
+
+    # only a trail's newest segment (into the ship's current position) may
+    # cover rain -- older segments must not obscure it. lvl (per output
+    # pixel, 0 = no rain) already exists from the radar classification
+    # above; PIL can't skip pixels conditionally mid-line, so both newest
+    # and older segments are drawn onto per-ship scratch layers first, then
+    # combined across ships and composited back.
+    #
+    # Two ships' trails can cross. Combining them by simply drawing each
+    # ship in turn onto one shared layer would let whichever ship happens
+    # to be processed last win at the crossing, regardless of which trail
+    # is actually more relevant there -- so each ship gets its own scratch
+    # layer (seeded at 255, the same value as SHIP_HALO/BACKGROUND, which
+    # is the identity value for the np.minimum combine below: "no trail
+    # here yet" can never beat a real trail pixel from another ship), and
+    # layers are combined with np.minimum -- lower pixel values are darker,
+    # and a darker trail pixel means a FRESHER (less-faded) segment, so the
+    # freshest of any crossing trails is always what ends up on top.
+    not_rain_img = Image.fromarray((lvl == 0).astype(np.uint8) * 255, "L")
+    H_px, W_px = img.height, img.width
+    new_seg_color = np.full((H_px, W_px), 255, np.uint8)
+    new_seg_coverage = np.zeros((H_px, W_px), np.uint8)
+    old_trail_color = np.full((H_px, W_px), 255, np.uint8)
+    old_trail_coverage = np.zeros((H_px, W_px), np.uint8)
+
     for ship in ships or []:
         lon, lat = ship.get("lon"), ship.get("lat")
         if lon is None or lat is None:
@@ -576,8 +826,53 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         trail = ship.get("trail") or []
         if trail:
             pts = [ll2r(p["lon"], p["lat"]) for p in trail] + [(x, y)]
-            d.line(pts, fill=SHIP_HALO, width=3, joint="curve")
-            d.line(pts, fill=SHIP_MARK, width=1, joint="curve")
+            # each segment's halo backing is drawn alongside its own fill
+            # below, NOT as one blanket line across the whole trail -- a
+            # blanket halo draw would paint background color (still a
+            # visible overwrite) across older segments too, exactly what
+            # the "don't cover rain" rule below is trying to prevent
+            #
+            # each segment fades by the age of its older (trailing) end,
+            # over the trail's own full SHIP_TRAIL_FADE_MINUTES window (NOT
+            # the ship mark's much shorter SHIP_MAX_AGE_MINUTES -- that's
+            # only how long the ship keeps showing at all) -- so the trail
+            # lightens smoothly section by section the further back it
+            # goes, and its newest segment (into the current position) ends
+            # at exactly the mark's own fade level, not a mismatched fixed
+            # colour, since both start from the same age=0 point
+            ages = [p["age_minutes"] for p in trail] + [ship.get("age_minutes", 0)]
+            newest_i = len(pts) - 2
+
+            ship_new_color = Image.new("L", img.size, 255)
+            ship_new_draw = ImageDraw.Draw(ship_new_color)
+            ship_new_coverage = Image.new("L", img.size, 0)
+            ship_new_coverage_draw = ImageDraw.Draw(ship_new_coverage)
+            ship_old_color = Image.new("L", img.size, 255)
+            ship_old_draw = ImageDraw.Draw(ship_old_color)
+            ship_old_coverage = Image.new("L", img.size, 0)
+            ship_old_coverage_draw = ImageDraw.Draw(ship_old_coverage)
+
+            for i in range(len(pts) - 1):
+                seg_frac = min(max(ages[i] / SHIP_TRAIL_FADE_MINUTES, 0), 1)
+                seg_fill = round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK))
+                if i == newest_i:
+                    ship_new_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    ship_new_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    ship_new_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
+                else:
+                    ship_old_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    ship_old_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    ship_old_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
+
+            # coverage masks track WHERE each ship actually drew, independent
+            # of the drawn value -- a halo pixel or a fully-faded fill pixel
+            # both legitimately equal 255 (BACKGROUND), which would be
+            # indistinguishable from "nothing drawn here" if coverage were
+            # inferred from the colour layer instead of tracked explicitly
+            new_seg_color = np.minimum(new_seg_color, np.asarray(ship_new_color))
+            new_seg_coverage = np.maximum(new_seg_coverage, np.asarray(ship_new_coverage))
+            old_trail_color = np.minimum(old_trail_color, np.asarray(ship_old_color))
+            old_trail_coverage = np.maximum(old_trail_coverage, np.asarray(ship_old_coverage))
 
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
@@ -594,6 +889,18 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         # ship fades smoothly out of view instead of popping off the map
         age_frac = min(max(ship.get("age_minutes", 0) / SHIP_MAX_AGE_MINUTES, 0), 1)
         mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
+        mark_draws.append((x, y, direction, mark_fill))
+
+    # newest segments composite first (may cover rain, same as a direct draw
+    # would), older segments after -- masked to not-rain, so together they
+    # keep the same relative order as before this became a combine-then-
+    # paste process instead of drawing straight onto img
+    img.paste(Image.fromarray(new_seg_color, "L"), (0, 0), Image.fromarray(new_seg_coverage, "L"))
+
+    old_trail_mask = ImageChops.multiply(Image.fromarray(old_trail_coverage, "L"), not_rain_img)
+    img.paste(Image.fromarray(old_trail_color, "L"), (0, 0), old_trail_mask)
+
+    for x, y, direction, mark_fill in mark_draws:
         _draw_ship(d, x, y, direction, mark_fill)
 
     mx, my = ll2r(LOCATION_LON, LOCATION_LAT)
@@ -606,6 +913,18 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None):
         time_font = _load_font(30)
         d.text((16, 12), "Met Éireann", fill=COAST_LINE, font=label_font)
         d.text((16, 34), frame_time.strftime("%d/%m/%Y, %H:%M"), fill=COAST_LINE, font=time_font)
+
+    if SHOW_SOLIS_STRIP:
+        # the map itself is fully drawn and clipped to its own (narrower) W x H
+        # above -- only now does it get pasted onto the full device canvas,
+        # so a coastline/ship line that would otherwise run past the map's own
+        # edge can never bleed into the strip
+        full_w, full_h = canvas_size()
+        canvas = Image.new("L", (full_w, full_h), BACKGROUND)
+        canvas.paste(img, (0, 0))
+        img = canvas
+        d = ImageDraw.Draw(img)
+        _draw_solis_strip(d, W, full_w, H, solis)
 
     return img
 
@@ -634,7 +953,8 @@ def main():
     png_files = [f for f in NotListed if f.lower().endswith(".png")]
 
     ship_history = load_ship_history()
-    
+    solis_history = load_solis_history()
+
     for imgpath in png_files:
         print(f"{imgpath}")
         src = Image.open(f"{RadarImageSubfolder}/{imgpath}").convert("RGB") if imgpath else fetch_latest()
@@ -649,7 +969,8 @@ def main():
         )
         at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
         ships = ships_at(ship_history, at_time)
-        img = render(src, load_counties(), load_coastline(), frame_time, ships)
+        solis = solis_at(solis_history, at_time)
+        img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
