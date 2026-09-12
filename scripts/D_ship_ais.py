@@ -102,27 +102,43 @@ def _handle_message(raw, ships):
 
 async def collect():
     """Subscribe to the bounding box and collect position reports for
-    LISTEN_SECONDS, keeping only the latest report per ship (by MMSI)."""
+    LISTEN_SECONDS, keeping only the latest report per ship (by MMSI).
+
+    Retries the connection once if it drops before the deadline -- observed
+    in practice ("no close frame received or sent"): aisstream's websocket
+    can disconnect mid-listen without a clean closing handshake. Without a
+    retry, a drop early in the 90s window ends the whole fetch with
+    whatever few ships it caught before then, and the next attempt is a
+    full MIN_FETCH_INTERVAL_MINUTES away. The retry reconnects fresh but
+    keeps the SAME deadline (doesn't restart a new 90s budget), so a drop
+    still can't turn one fetch into a much longer one."""
     ships = {}
     deadline = time.monotonic() + LISTEN_SECONDS
-    try:
-        async with websockets.connect(AISSTREAM_URL) as ws:
-            await ws.send(json.dumps({
-                "APIKey": API_KEY,
-                "BoundingBoxes": BOUNDING_BOX,
-                "FilterMessageTypes": ["PositionReport"],
-            }))
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-                _handle_message(raw, ships)
-    except Exception as e:
-        print(f"    (error: {e})")
+    attempts_left = 2
+    while attempts_left > 0:
+        attempts_left -= 1
+        try:
+            async with websockets.connect(AISSTREAM_URL) as ws:
+                await ws.send(json.dumps({
+                    "APIKey": API_KEY,
+                    "BoundingBoxes": BOUNDING_BOX,
+                    "FilterMessageTypes": ["PositionReport"],
+                }))
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return ships
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        return ships
+                    _handle_message(raw, ships)
+        except Exception as e:
+            remaining = deadline - time.monotonic()
+            if attempts_left > 0 and remaining > 0:
+                print(f"    (connection dropped: {e}; reconnecting for the remaining {remaining:.0f}s)")
+            else:
+                print(f"    (error: {e})")
     return ships
 
 
