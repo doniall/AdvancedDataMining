@@ -195,6 +195,19 @@ BATTERY_SOC_CANDIDATES = [
     ("batteryPercent", None),
     ("remainingCapacity", None),
 ]
+BATTERY_DISCHARGE_TODAY_CANDIDATES = [
+    ("batteryDischargeEnergy", "batteryDischargeEnergyStr"),   # confirmed against two real captures
+                                                                 # a day apart (3.0 -> 4.0 kWh) --
+                                                                 # despite the plain name, this is the
+                                                                 # one that actually reflects a single
+                                                                 # day's discharge; consistent with the
+                                                                 # month/year figures over that period
+    ("batteryTodayDischargeEnergy", "batteryTodayDischargeEnergyUnit"),   # literally named "today" but
+                                                                 # was 0 in both real captures above --
+                                                                 # same dayEnergy/eToday-style mismatch
+                                                                 # as TODAY_PRODUCTION_CANDIDATES below,
+                                                                 # kept only as a fallback
+]
 TODAY_PRODUCTION_CANDIDATES = [
     ("dayEnergy", "dayEnergyUnit"),
     ("eToday", "eTodayUnit"),
@@ -499,6 +512,7 @@ def main():
     grid_kw, grid_unit = _pick(data, GRID_NOW_CANDIDATES)
     battery_pct, _ = _pick(data, BATTERY_SOC_CANDIDATES)
     battery_kw, battery_power_unit = _pick(data, BATTERY_POWER_CANDIDATES)
+    battery_discharge_today_kwh, battery_discharge_today_unit = _pick(data, BATTERY_DISCHARGE_TODAY_CANDIDATES)
     today_kwh, today_unit = _pick(data, TODAY_PRODUCTION_CANDIDATES)
     today_consumption_kwh, today_consumption_unit = _pick(data, TODAY_CONSUMPTION_CANDIDATES)
     today_export_kwh, today_export_unit = _pick(data, TODAY_GRID_EXPORT_CANDIDATES)
@@ -554,6 +568,8 @@ def main():
         "battery_pct": battery_pct,
         "battery_kw": battery_kw,
         "battery_power_unit": battery_power_unit,
+        "battery_discharge_today_kwh": battery_discharge_today_kwh,
+        "battery_discharge_today_unit": battery_discharge_today_unit,
         "today_kwh": today_kwh,
         "today_unit": today_unit,
         "today_consumption_kwh": today_consumption_kwh,
