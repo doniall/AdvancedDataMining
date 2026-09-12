@@ -826,7 +826,10 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     land_mask_img = Image.new("L", img.size, 0)
     land_mask_draw = ImageDraw.Draw(land_mask_img)
     for ring in rings_Coast:
-        if ring[0] == ring[-1]:
+        # ring is a numpy array (see load_coastline()), so ring[0] == ring[-1]
+        # does an element-wise (lon, lat) comparison and returns a 2-element
+        # array, not a single bool -- np.array_equal collapses that correctly
+        if np.array_equal(ring[0], ring[-1]):
             land_mask_draw.polygon([ll2r(lo, la) for lo, la in ring], fill=255)
     not_land = np.asarray(land_mask_img) == 0
 
