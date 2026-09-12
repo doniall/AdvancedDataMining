@@ -108,7 +108,17 @@ def _latest_greyscale_filenames(n=IMAGE_PUSH_COUNT):
 
 
 def _run(args, cwd, check=True):
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
+    # GIT_TERMINAL_PROMPT=0 makes a git call that can't authenticate fail
+    # immediately with a clear error, instead of hanging on an interactive
+    # username/password prompt that (a) nothing is there to answer when this
+    # runs unattended, and (b) can never succeed anyway -- GitHub has
+    # rejected plain password auth for git operations for years; the prompt
+    # was always going to fail once you did enter something. See this
+    # repo's Azure/GitHub credential setup notes for how to make pushes
+    # authenticate silently instead (a Personal Access Token stored via the
+    # OS credential helper, or an SSH key).
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check, env=env)
 
 
 def _repo_root():
