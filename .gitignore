@@ -3,3 +3,13 @@ __pycache__/
 scripts/ship_history.json
 scripts/ship_ais_last_fetch.txt
 scripts/clutter_debug.png
+
+# generated at runtime by the pipeline -- not source, shouldn't get committed
+# to a dev branch by an accidental `git add -A`
+scripts/0_RadarPNG/
+scripts/1_GreyscalePNG/
+scripts/solis_status.json
+scripts/solis_device.json
+scripts/solis_fetch_state.json
+scripts/solis_history.json
+scripts/sensecraft_last_pushed.json
