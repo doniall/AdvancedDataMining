@@ -52,7 +52,13 @@ def main():
     if has_local_changes:
         print("local changes found -- stashing before pulling:")
         print(status.strip())
-        stash = run(["git", "stash"])
+        # -u (--include-untracked) matters: plain `git stash` only stashes
+        # tracked changes. An untracked file (e.g. a new script sitting on
+        # disk that was never `git add`ed) wouldn't be touched by a plain
+        # stash, then blocks the pull outright if the incoming commit tries
+        # to create a tracked file at that same path -- "would be
+        # overwritten by merge." -u covers that case too.
+        stash = run(["git", "stash", "-u"])
         print(stash.stdout.strip())
     else:
         print("no local changes -- nothing to stash")

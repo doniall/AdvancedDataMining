@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.DS_Store
 scripts/ship_history.json
 scripts/ship_ais_last_fetch.txt
 scripts/clutter_debug.png
