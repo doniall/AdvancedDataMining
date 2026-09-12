@@ -812,6 +812,24 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     # freshest of any crossing trails is always what ends up on top.
     not_rain_img = Image.fromarray((lvl == 0).astype(np.uint8) * 255, "L")
     H_px, W_px = img.height, img.width
+
+    # a ship's actual path is curved/at sea the whole way, but a trail
+    # segment is just a straight line between two AIS fixes -- near a
+    # headland or an island that chord can visually cut across land even
+    # though the real ship never did. rings_Coast includes both closed
+    # rings (a real landmass -- Ireland's mainland plus its smaller
+    # islands, all with a well-defined interior we can fill) and open ones
+    # (other coastlines -- e.g. Britain's -- clipped at this map's edge,
+    # left as fragments with no interior, so NOT filled here; land-
+    # avoidance below only covers what the closed rings represent, not
+    # every landmass visible in frame)
+    land_mask_img = Image.new("L", img.size, 0)
+    land_mask_draw = ImageDraw.Draw(land_mask_img)
+    for ring in rings_Coast:
+        if ring[0] == ring[-1]:
+            land_mask_draw.polygon([ll2r(lo, la) for lo, la in ring], fill=255)
+    not_land = np.asarray(land_mask_img) == 0
+
     new_seg_color = np.full((H_px, W_px), 255, np.uint8)
     new_seg_coverage = np.zeros((H_px, W_px), np.uint8)
     old_trail_color = np.full((H_px, W_px), 255, np.uint8)
@@ -902,10 +920,15 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     # newest segments composite first (may cover rain, same as a direct draw
     # would), older segments after -- masked to not-rain, so together they
     # keep the same relative order as before this became a combine-then-
-    # paste process instead of drawing straight onto img
-    img.paste(Image.fromarray(new_seg_color, "L"), (0, 0), Image.fromarray(new_seg_coverage, "L"))
+    # paste process instead of drawing straight onto img. Both are also
+    # masked to not_land -- unlike rain, which the newest segment is
+    # deliberately allowed to cover, land is never acceptable to draw a
+    # trail over, so this applies to every segment with no exception.
+    new_seg_mask = new_seg_coverage * not_land
+    img.paste(Image.fromarray(new_seg_color, "L"), (0, 0), Image.fromarray(new_seg_mask, "L"))
 
-    old_trail_mask = ImageChops.multiply(Image.fromarray(old_trail_coverage, "L"), not_rain_img)
+    old_trail_mask_arr = old_trail_coverage * not_land
+    old_trail_mask = ImageChops.multiply(Image.fromarray(old_trail_mask_arr, "L"), not_rain_img)
     img.paste(Image.fromarray(old_trail_color, "L"), (0, 0), old_trail_mask)
 
     for x, y, direction, mark_fill in mark_draws:
