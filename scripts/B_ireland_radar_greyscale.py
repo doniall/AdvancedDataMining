@@ -310,10 +310,19 @@ def classify(r, g, b):
     lvl = np.zeros(r.shape, int)
     lvl[rain] = idx + 1
 
+    # fills small anti-aliasing gaps INSIDE a rain blob (pixels that fell just
+    # under the sat/mx threshold at a colour-band edge but are clearly
+    # surrounded by real rain) -- must exclude is_background() too, not just
+    # lvl==0, or a large uniform background region (olive OR the black
+    # variant) sitting next to a real rain cluster gets slowly eaten into by
+    # this over repeated passes, since nothing else marks it "background,
+    # not a gap." That's what was turning a black no-data inset into fake
+    # heavy rain in the output.
+    not_bg = ~is_background(r, g, b)
     from PIL import ImageFilter
     for _ in range(5):
         med = np.asarray(Image.fromarray(lvl.astype(np.uint8)).filter(ImageFilter.MedianFilter(5)))
-        gap = (lvl == 0) & (med > 0)
+        gap = (lvl == 0) & (med > 0) & not_bg
         lvl[gap] = med[gap]
 
     return lvl
@@ -507,9 +516,22 @@ def _draw_ship(d, x, y, direction_deg, mark_fill=SHIP_MARK):
 def fill_black(A, thresh=95, max_iter=16):
     """Replace any near-black pixels (tile-stitch seams, if any) with the average
     of the nearest non-black pixels, so rain reads continuous across them.
-    A is an HxWx3 float array; returns the same, filled."""
+    A is an HxWx3 float array; returns the same, filled.
+
+    Deliberate near-black background (is_background()'s own black check --
+    some tiles use it as the same "dry, in range" convention olive means
+    elsewhere) is excluded from that fill, exactly like olive already is
+    (olive's max channel, 112, already clears `thresh` on its own). Without
+    this, a large solid-black region -- e.g. a whole inset panel, not a
+    thin seam -- gets its border eaten into and blended with whatever real
+    rain sits next to it, since nothing here distinguishes "a couple of
+    stitch-seam pixels" from "a big deliberate black area." Only a
+    non-trivial max_iter can reach more than a thin border either way, so a
+    large black area's own interior was already safe -- this closes the
+    border case."""
     A = A.astype(np.float32); H, W, _ = A.shape
-    known = A.max(2) >= thresh          # True = keep; False = black line to fill
+    known = (A.max(2) >= thresh) | is_background(A[:, :, 0], A[:, :, 1], A[:, :, 2])
+                                         # True = keep; False = black line to fill
     out = A.copy(); out[~known] = 0.0
     kn = known.astype(np.float32)
     for _ in range(max_iter):
