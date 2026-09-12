@@ -174,12 +174,20 @@ SHIP_MAX_AGE_MINUTES = 120         # how much of a ship's history D_ship_ais.py'
                                     # 15-min minimum cadence plus normal coverage gaps
                                     # means "no sample in the last 20 min" was the common
                                     # case, not the exception, before this was raised)
-SHIP_TRAIL_MAX_POINTS = 5          # up to this many of the ship's most recent
-                                    # PRIOR records, drawn as an actual path
-SHIP_TRAIL_WINDOW_MINUTES = 120    # ...but only ones within this long before its own
-                                    # most recent record -- same "last 2h mapped" rule
-                                    # as SHIP_MAX_AGE_MINUTES, kept as its own constant
-                                    # in case the two ever need to diverge
+SHIP_TRAIL_MAX_POINTS = 500         # effectively unbounded -- SHIP_TRAIL_WINDOW_MINUTES
+                                    # below is the real limit on how much trail shows;
+                                    # capping the point COUNT on top of that would just
+                                    # thin out an otherwise-faithful path for no reason
+SHIP_TRAIL_WINDOW_MINUTES = 24*60   # how far back a SHOWN ship's trail reaches --
+                                    # deliberately much longer than SHIP_MAX_AGE_MINUTES:
+                                    # a ship still needs to have been seen within the last
+                                    # 2h to show AT ALL, but once it's shown, its trail
+                                    # reaches back a full day, not just those same 2h
+SHIP_TRAIL_FADE_MINUTES = SHIP_TRAIL_WINDOW_MINUTES   # trail segments fade out over their
+                                    # own full window, not SHIP_MAX_AGE_MINUTES -- using the
+                                    # mark's much shorter 2h fade here would leave every
+                                    # segment older than 2h already fully faded to
+                                    # invisible, defeating the point of a 24h trail
 
 
 def load_ship_history():
@@ -788,15 +796,26 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     # only a trail's newest segment (into the ship's current position) may
     # cover rain -- older segments must not obscure it. lvl (per output
     # pixel, 0 = no rain) already exists from the radar classification
-    # above; PIL can't skip pixels conditionally mid-line, so older segments
-    # are drawn onto scratch layers first and composited back through a
-    # not-rain mask, while the newest segment (and the halo backing, which
-    # is already background-colored and reads fine over rain) draw directly
+    # above; PIL can't skip pixels conditionally mid-line, so both newest
+    # and older segments are drawn onto per-ship scratch layers first, then
+    # combined across ships and composited back.
+    #
+    # Two ships' trails can cross. Combining them by simply drawing each
+    # ship in turn onto one shared layer would let whichever ship happens
+    # to be processed last win at the crossing, regardless of which trail
+    # is actually more relevant there -- so each ship gets its own scratch
+    # layer (seeded at 255, the same value as SHIP_HALO/BACKGROUND, which
+    # is the identity value for the np.minimum combine below: "no trail
+    # here yet" can never beat a real trail pixel from another ship), and
+    # layers are combined with np.minimum -- lower pixel values are darker,
+    # and a darker trail pixel means a FRESHER (less-faded) segment, so the
+    # freshest of any crossing trails is always what ends up on top.
     not_rain_img = Image.fromarray((lvl == 0).astype(np.uint8) * 255, "L")
-    old_trail_color = Image.new("L", img.size, 0)
-    old_trail_draw = ImageDraw.Draw(old_trail_color)
-    old_trail_coverage = Image.new("L", img.size, 0)
-    old_trail_coverage_draw = ImageDraw.Draw(old_trail_coverage)
+    H_px, W_px = img.height, img.width
+    new_seg_color = np.full((H_px, W_px), 255, np.uint8)
+    new_seg_coverage = np.zeros((H_px, W_px), np.uint8)
+    old_trail_color = np.full((H_px, W_px), 255, np.uint8)
+    old_trail_coverage = np.zeros((H_px, W_px), np.uint8)
 
     for ship in ships or []:
         lon, lat = ship.get("lon"), ship.get("lat")
@@ -813,23 +832,47 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
             # visible overwrite) across older segments too, exactly what
             # the "don't cover rain" rule below is trying to prevent
             #
-            # each segment fades by the age of its older (trailing) end, same
-            # formula as the ship mark's own age fade below -- so the trail
-            # lightens smoothly section by section the further back it goes,
-            # and its newest segment (into the current position) ends at
-            # exactly the mark's own fade level, not a mismatched fixed color
+            # each segment fades by the age of its older (trailing) end,
+            # over the trail's own full SHIP_TRAIL_FADE_MINUTES window (NOT
+            # the ship mark's much shorter SHIP_MAX_AGE_MINUTES -- that's
+            # only how long the ship keeps showing at all) -- so the trail
+            # lightens smoothly section by section the further back it
+            # goes, and its newest segment (into the current position) ends
+            # at exactly the mark's own fade level, not a mismatched fixed
+            # colour, since both start from the same age=0 point
             ages = [p["age_minutes"] for p in trail] + [ship.get("age_minutes", 0)]
             newest_i = len(pts) - 2
+
+            ship_new_color = Image.new("L", img.size, 255)
+            ship_new_draw = ImageDraw.Draw(ship_new_color)
+            ship_new_coverage = Image.new("L", img.size, 0)
+            ship_new_coverage_draw = ImageDraw.Draw(ship_new_coverage)
+            ship_old_color = Image.new("L", img.size, 255)
+            ship_old_draw = ImageDraw.Draw(ship_old_color)
+            ship_old_coverage = Image.new("L", img.size, 0)
+            ship_old_coverage_draw = ImageDraw.Draw(ship_old_coverage)
+
             for i in range(len(pts) - 1):
-                seg_frac = min(max(ages[i] / SHIP_MAX_AGE_MINUTES, 0), 1)
+                seg_frac = min(max(ages[i] / SHIP_TRAIL_FADE_MINUTES, 0), 1)
                 seg_fill = round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK))
                 if i == newest_i:
-                    d.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
-                    d.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    ship_new_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    ship_new_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    ship_new_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
                 else:
-                    old_trail_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
-                    old_trail_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
-                    old_trail_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
+                    ship_old_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
+                    ship_old_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
+                    ship_old_coverage_draw.line([pts[i], pts[i + 1]], fill=255, width=3, joint="curve")
+
+            # coverage masks track WHERE each ship actually drew, independent
+            # of the drawn value -- a halo pixel or a fully-faded fill pixel
+            # both legitimately equal 255 (BACKGROUND), which would be
+            # indistinguishable from "nothing drawn here" if coverage were
+            # inferred from the colour layer instead of tracked explicitly
+            new_seg_color = np.minimum(new_seg_color, np.asarray(ship_new_color))
+            new_seg_coverage = np.maximum(new_seg_coverage, np.asarray(ship_new_coverage))
+            old_trail_color = np.minimum(old_trail_color, np.asarray(ship_old_color))
+            old_trail_coverage = np.maximum(old_trail_coverage, np.asarray(ship_old_coverage))
 
         heading, cog = ship.get("heading"), ship.get("cog")
         direction = heading if heading not in (None, 511) else (
@@ -848,8 +891,14 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
         mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
         mark_draws.append((x, y, direction, mark_fill))
 
-    old_trail_mask = ImageChops.multiply(old_trail_coverage, not_rain_img)
-    img.paste(old_trail_color, (0, 0), old_trail_mask)
+    # newest segments composite first (may cover rain, same as a direct draw
+    # would), older segments after -- masked to not-rain, so together they
+    # keep the same relative order as before this became a combine-then-
+    # paste process instead of drawing straight onto img
+    img.paste(Image.fromarray(new_seg_color, "L"), (0, 0), Image.fromarray(new_seg_coverage, "L"))
+
+    old_trail_mask = ImageChops.multiply(Image.fromarray(old_trail_coverage, "L"), not_rain_img)
+    img.paste(Image.fromarray(old_trail_color, "L"), (0, 0), old_trail_mask)
 
     for x, y, direction, mark_fill in mark_draws:
         _draw_ship(d, x, y, direction, mark_fill)
