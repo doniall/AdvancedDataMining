@@ -99,12 +99,16 @@ BACKGROUND_RGB       = np.array([71, 112, 76], float)
 BACKGROUND_TOLERANCE = 30
 
 # some tiles (seen at the NE edge of the fetched grid, likely a different
-# upstream source stitched into the same mosaic) render their own
-# dry-but-in-range background as near-black instead of the olive above --
-# same meaning (radar coverage, no rain), just a different colour
-# convention. RAMP's darkest rain colour still has a max channel of 190,
-# comfortably clear of this, so it can't swallow real heavy rain.
-BLACK_BACKGROUND_TOLERANCE = 40
+# upstream source stitched into the same mosaic, and also at a UK-radar
+# inset panel further south) render their own dry-but-in-range background
+# as near-black instead of the olive above -- same meaning (radar
+# coverage, no rain), just a different colour convention. Even the closest
+# real RAMP colour sits 207 RGB units from pure black (see conversation
+# history for the check), so this has enormous headroom -- widened from an
+# original 40, which was too tight to reliably catch this convention's
+# actual shade (likely a not-quite-pure black from compression/blending)
+# and let a whole inset panel get misread as rain-adjacent background.
+BLACK_BACKGROUND_TOLERANCE = 100
 
 GREY = {i+1: v for i, v in enumerate(
     [224,198,186,174,162,150,138,126,112,98,84,70,58,46,36,30])}  # light -> dark
@@ -726,6 +730,16 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
               "the projection may be off." % (IMG_W, IMG_H, src.width, src.height))
+
+    # collapse the black background convention into literally the same pixel
+    # value as the olive one, up front -- rather than teaching every later
+    # step (fill_black, classify, is_background's own callers) to treat
+    # black as a special case alongside olive, this makes black simply STOP
+    # EXISTING as a distinct colour before any of them run. Whatever used to
+    # be near-black reads as ordinary olive background from here on, with
+    # no separate code path left to get out of sync.
+    black_bg = (A ** 2).sum(2) < BLACK_BACKGROUND_TOLERANCE ** 2
+    A[black_bg] = BACKGROUND_RGB
 
     A = fill_black(A)
 
