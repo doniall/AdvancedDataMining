@@ -823,6 +823,17 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
             continue
         x, y = ll2r(lon, lat)
 
+        # fade the mark toward the background as the ship's data gets older,
+        # reaching full background (invisible) right at SHIP_MAX_AGE_MINUTES --
+        # the same point it would otherwise just vanish outright, so a stale
+        # ship fades smoothly out of view instead of popping off the map.
+        # Computed here, before the trail below, so the trail can be clamped
+        # against it -- the ship's current position is always the freshest
+        # point in its own history, so nothing in its trail should ever look
+        # darker (fresher) than the mark itself.
+        age_frac = min(max(ship.get("age_minutes", 0) / SHIP_MAX_AGE_MINUTES, 0), 1)
+        mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
+
         trail = ship.get("trail") or []
         if trail:
             pts = [ll2r(p["lon"], p["lat"]) for p in trail] + [(x, y)]
@@ -835,11 +846,14 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
             # each segment fades by the age of its older (trailing) end,
             # over the trail's own full SHIP_TRAIL_FADE_MINUTES window (NOT
             # the ship mark's much shorter SHIP_MAX_AGE_MINUTES -- that's
-            # only how long the ship keeps showing at all) -- so the trail
-            # lightens smoothly section by section the further back it
-            # goes, and its newest segment (into the current position) ends
-            # at exactly the mark's own fade level, not a mismatched fixed
-            # colour, since both start from the same age=0 point
+            # only how long the ship keeps showing at all). That window
+            # being ~12x longer than the mark's own means the SAME absolute
+            # age, taken as a fraction of it, comes out much smaller -- i.e.
+            # a trail segment could otherwise render darker than a heavily-
+            # faded mark at that same age, which reads as backwards (the
+            # trail looking fresher than the ship it belongs to). Clamped
+            # against mark_fill below so a segment is never darker than the
+            # mark, only ever the same or lighter.
             ages = [p["age_minutes"] for p in trail] + [ship.get("age_minutes", 0)]
             newest_i = len(pts) - 2
 
@@ -854,7 +868,7 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
 
             for i in range(len(pts) - 1):
                 seg_frac = min(max(ages[i] / SHIP_TRAIL_FADE_MINUTES, 0), 1)
-                seg_fill = round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK))
+                seg_fill = max(round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK)), mark_fill)
                 if i == newest_i:
                     ship_new_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
                     ship_new_draw.line([pts[i], pts[i + 1]], fill=seg_fill, width=1, joint="curve")
@@ -883,12 +897,6 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
             tx, ty = ll2r(trail[-1]["lon"], trail[-1]["lat"])
             direction = math.degrees(math.atan2(x - tx, ty - y)) % 360
 
-        # fade the mark toward the background as the ship's data gets older,
-        # reaching full background (invisible) right at SHIP_MAX_AGE_MINUTES --
-        # the same point it would otherwise just vanish outright, so a stale
-        # ship fades smoothly out of view instead of popping off the map
-        age_frac = min(max(ship.get("age_minutes", 0) / SHIP_MAX_AGE_MINUTES, 0), 1)
-        mark_fill = round(SHIP_MARK + age_frac * (BACKGROUND - SHIP_MARK))
         mark_draws.append((x, y, direction, mark_fill))
 
     # newest segments composite first (may cover rain, same as a direct draw
