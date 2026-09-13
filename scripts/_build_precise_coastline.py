@@ -4,46 +4,59 @@ _build_precise_coastline.py
 
 One-off generator, not part of the regular pipeline -- run by hand whenever
 ireland_counties.json or ireland_coastline.json change. Writes
-ireland_coastline_precise.json, a higher-resolution coastline derived from
-ireland_counties.json for use as the DRAWN coastline (see
-B_ireland_radar_greyscale.py's load_precise_coastline()) -- NOT as a
-replacement for ireland_coastline.json's role in the land mask that keeps
-ship trails off land, which needs genuinely closed landmass rings and stays
-on the original data.
+ireland_coastline_precise.json: the SAME rings as ireland_coastline.json's
+closed (landmass) rings, but with detail spliced in from
+ireland_counties.json wherever available. One continuous line per
+landmass -- not a second, independently-drawn line -- so there's no
+ghosting where the two datasets disagree by a pixel or two, and no
+orphan dots from fragments that don't connect to anything.
+
+Only for DRAWING (see B_ireland_radar_greyscale.py's
+load_precise_coastline()) -- ireland_coastline.json itself still drives the
+land mask that keeps ship trails off land.
 
 WHY THIS EXISTS
     ireland_counties.json digitizes each county's own boundary far more
     finely than ireland_coastline.json digitizes the coastline as a whole
     (confirmed against a real capture: ~11x the vertex density in the
-    Dublin Bay area alone) -- because it's tracing each county's real
-    boundary in detail, whereas ireland_coastline.json is a single
-    lower-resolution trace of the whole coast. Wherever a county's own
-    edge faces the sea, that finer digitization IS the coastline; it's just
-    never been extracted on its own before.
+    Dublin Bay area alone).
 
 METHOD
-    1. Every edge in ireland_counties.json's rings is counted. An edge
-       shared by two adjacent counties (an inland administrative border)
-       appears exactly twice; an edge on the true exterior (facing the sea,
-       or -- since this dataset only covers the Republic's 26 counties --
-       facing Northern Ireland) appears exactly once. Confirmed against a
-       real capture: every edge is either count 1 or count 2, no
-       three-way ties, so this split is unambiguous.
-    2. Singleton edges are chained at shared endpoints into polylines (open
-       chains between two county-border junctions) and, where a chain
-       closes on itself with no junction at all (a small island bordering
-       no other county), simple loops.
-    3. Northern Ireland problem: with no NI county on the other side, the
-       land border with NI also shows up as singleton edges -- there's
-       nothing in the edge-count step to tell it apart from real coast.
-       Confirmed against a real capture: the chains it produces are
-       obviously distinct by shape, not just in principle -- the 3 largest
-       chains (527-1072 points, all in the 54-55N Donegal/NI-border
-       latitude band) sit 100km+ from the nearest point on the existing
-       (trusted) ireland_coastline.json at their farthest point, while
-       every other chain -- real coast, including small islands -- stays
-       within ~6.5km of it. MAX_DIST_TO_REFERENCE_KM (15) sits with wide
-       margin in that gap and discards the NI-border chains cleanly.
+    1. Candidate detail: every edge in ireland_counties.json's rings is
+       counted. An edge shared by two adjacent counties (an inland
+       administrative border, OR a shared river/estuary boundary -- there's
+       no attribute in this data to tell those apart) appears exactly
+       twice; an edge on the true exterior (facing the sea, or -- since
+       this dataset only covers the Republic's 26 counties -- facing
+       Northern Ireland) appears exactly once. An earlier version of this
+       script used ONLY singleton edges, which excluded real coastline
+       wherever a county boundary follows a river inland to the sea (e.g.
+       the Boyne estuary) -- confirmed by an actual render showing exactly
+       that gap. This version doesn't try to classify doubled edges at
+       all; it sidesteps the question in step 2 instead.
+    2. Singleton edges are chained into polylines (open chains between two
+       county-border junctions, or closed loops for small islands bordering
+       no other county). Each chain's two endpoints are matched against
+       ireland_coastline.json's own closed rings by nearest point ON the
+       ring's path (not nearest vertex -- a real junction rarely lands
+       exactly on an existing coarse vertex). Confirmed against a real
+       capture: median match distance is 0km (many chains' endpoints sit
+       exactly on the existing path) and 90% are within ~1km --
+       MAX_MATCH_DISTANCE_KM (2) sits just above that with margin.
+    3. A chain matched on BOTH ends to the same base ring gets SPLICED in:
+       the base ring's own points between those two matched positions are
+       replaced by the chain's own (finer) points, oriented to match the
+       base ring's own point order. This is what avoids drawing two
+       independent, slightly-offset lines for the same stretch of coast --
+       there's only ever one ring, one line. A chain that doesn't match
+       both ends closely enough (an island the base ring doesn't touch, a
+       stray fragment, or -- confirmed against a real capture -- the
+       Northern Ireland border, which sits 100km+ from anything in
+       ireland_coastline.json) is simply left out, rather than drawn as an
+       orphan fragment.
+    4. Overlapping matches on the same ring (rare; from the handful of
+       degree-4 junctions where two chains meet at one point) keep
+       whichever matched more precisely and drop the other.
 
 Run:   python3 _build_precise_coastline.py
 Needs: numpy
@@ -60,8 +73,22 @@ COUNTIES_PATH = os.path.join(HERE, "ireland_counties.json")
 COASTLINE_PATH = os.path.join(HERE, "ireland_coastline.json")
 OUT_PATH = os.path.join(HERE, "ireland_coastline_precise.json")
 
-COORD_PRECISION = 6           # decimal places for matching shared vertices between rings
-MAX_DIST_TO_REFERENCE_KM = 15  # see METHOD step 3 above -- real chains: ~6.5km max; NI border: 100km+
+COORD_PRECISION = 6          # decimal places for matching shared vertices between county rings
+MAX_MATCH_DISTANCE_KM = 2    # see METHOD step 2 above -- 90% of real chains match within ~1km
+
+# A real detail chain is a short LOCAL stretch of coast -- confirmed against
+# a real capture, even a long one (77 points) only spans ~10 ring-index
+# units. A closed ring's start and end index are the same geographic point,
+# which _nearest_on_ring (a plain 0..len(ring) arc position, no wraparound)
+# doesn't know -- a chain that happens to sit near that seam can match near
+# index 0 on one end and near index len(ring) on the other, computing as
+# "nearly the whole ring apart" when really they're adjacent. Confirmed
+# against a real capture: exactly this produced a match spanning 2083 of a
+# 2087-point ring, which then ate almost everything else in _splice. Rather
+# than handle the wraparound properly (rotating the ring, splicing across
+# the seam), such matches are just discarded like any other bad match --
+# the cost is one un-refined chain wherever the seam happens to fall.
+MAX_SPAN_INDEX = 100
 
 
 def _key(point, prec=COORD_PRECISION):
@@ -82,8 +109,8 @@ def _extract_singleton_edges(rings):
 def _chain_edges(singleton_edges):
     """Walk singleton edges into polylines (METHOD step 2): open chains
     starting from a junction (degree != 2) out to the next junction, then
-    whatever's left over as closed loops (islands with no junction at all).
-    Coordinates here are the rounded lookup keys, not the original
+    whatever's left over as closed loops (islands with no junction at
+    all). Coordinates here are the rounded lookup keys, not the original
     full-precision points -- _original_points() below recovers those."""
     adjacency = defaultdict(set)
     for a, b in singleton_edges:
@@ -144,45 +171,111 @@ def _original_points(rings):
     lookup = {}
     for ring in rings:
         for point in ring:
-            lookup.setdefault(_key(point), point)
+            lookup.setdefault(_key(point), point.tolist())
     return lookup
 
 
-def _max_dist_to_reference_km(chain_points, reference_points, sample=15):
-    """Farthest any point on this chain sits from its nearest point on the
-    reference coastline -- see METHOD step 3. Degrees->km via a flat
-    equirectangular approximation; plenty accurate for a 15km cutoff with a
-    100km-wide margin either side."""
-    pts = np.array(chain_points)
-    if len(pts) > sample:
-        pts = pts[np.linspace(0, len(pts) - 1, sample).astype(int)]
-    d = np.sqrt(((pts[:, None, :] - reference_points[None, :, :]) ** 2).sum(-1))
-    return float(d.min(axis=1).max()) * 111.0
+def _nearest_on_ring(point, ring):
+    """Closest point to `point` anywhere ON ring's path (not just its
+    vertices) -- returns (distance_km, arc_position), where arc_position is
+    a continuous "how far along the ring" measure (segment index + fraction
+    into that segment) used to place a chain's splice point precisely
+    between two existing ring vertices, not just at the nearest one."""
+    p = np.array(point)
+    a, b = ring[:-1], ring[1:]
+    ab = b - a
+    ab2 = (ab ** 2).sum(1)
+    ab2[ab2 == 0] = 1e-12
+    t = np.clip(((p - a) * ab).sum(1) / ab2, 0, 1)
+    proj = a + t[:, None] * ab
+    d = np.sqrt(((proj - p) ** 2).sum(1))
+    i = int(d.argmin())
+    return float(d[i]) * 111.0, i + float(t[i])
+
+
+def _splice(ring, matches):
+    """ring: one closed base ring (numpy array). matches: [(start_pos,
+    end_pos, chain_points), ...] already resolved to non-overlapping,
+    correctly-oriented (start_pos < end_pos) splices. Returns a new point
+    list: ring's own points, with each matched span's points replaced by
+    that chain's own points."""
+    matches = sorted(matches, key=lambda m: m[0])
+    out = []
+    cursor = 0.0
+    for start_pos, end_pos, chain_points in matches:
+        i = int(np.ceil(cursor))
+        j = int(np.floor(start_pos))
+        out.extend(ring[i:j + 1].tolist())
+        out.extend(chain_points)
+        cursor = end_pos
+    i = int(np.ceil(cursor))
+    out.extend(ring[i:].tolist())
+    return out
 
 
 def main():
     with open(COUNTIES_PATH) as f:
         counties = [np.array(r, float) for r in json.load(f)]
     with open(COASTLINE_PATH) as f:
-        coastline = json.load(f)
+        coastline_raw = json.load(f)
+    coastline = [np.array(r, float) for r in coastline_raw]
+    closed_ring_idx = [i for i, r in enumerate(coastline) if len(r) > 2 and np.array_equal(r[0], r[-1])]
 
     singleton_edges = _extract_singleton_edges(counties)
     chains_keyed = _chain_edges(singleton_edges)
     point_for_key = _original_points(counties)
-    chains = [[list(point_for_key[k]) for k in chain] for chain in chains_keyed]
+    chains = [[point_for_key[k] for k in chain] for chain in chains_keyed]
 
-    reference_points = np.array([p for ring in coastline for p in ring])
+    # match each chain's two endpoints against every closed base ring;
+    # keep only chains matching the SAME ring within tolerance on both ends
+    per_ring_matches = defaultdict(list)
+    matched, dropped = 0, 0
+    for chain in chains:
+        if len(chain) < 2:
+            continue
+        best = None  # (total_dist, ring_idx, start_pos, end_pos, oriented_points)
+        for ring_idx in closed_ring_idx:
+            ring = coastline[ring_idx]
+            d0, pos0 = _nearest_on_ring(chain[0], ring)
+            d1, pos1 = _nearest_on_ring(chain[-1], ring)
+            if d0 > MAX_MATCH_DISTANCE_KM or d1 > MAX_MATCH_DISTANCE_KM:
+                continue
+            if pos0 <= pos1:
+                start_pos, end_pos, points = pos0, pos1, chain
+            else:
+                start_pos, end_pos, points = pos1, pos0, list(reversed(chain))
+            if end_pos - start_pos > MAX_SPAN_INDEX:  # see MAX_SPAN_INDEX docstring above
+                continue
+            total = d0 + d1
+            if best is None or total < best[0]:
+                best = (total, ring_idx, start_pos, end_pos, points)
+        if best is None:
+            dropped += 1
+            continue
+        matched += 1
+        _, ring_idx, start_pos, end_pos, points = best
+        per_ring_matches[ring_idx].append((start_pos, end_pos, points))
 
-    kept = [c for c in chains if len(c) >= 2
-            and _max_dist_to_reference_km(c, reference_points) <= MAX_DIST_TO_REFERENCE_KM]
-    dropped = len(chains) - len(kept)
+    # drop overlapping matches on the same ring, keeping whichever chain is longer
+    # (a real coastal stretch) when two claim over the same span
+    out_rings = list(coastline_raw)
+    for ring_idx, spans in per_ring_matches.items():
+        spans.sort(key=lambda m: m[0])
+        kept = []
+        for span in spans:
+            if kept and span[0] < kept[-1][1]:
+                if (span[1] - span[0]) > (kept[-1][1] - kept[-1][0]):
+                    kept[-1] = span
+                continue
+            kept.append(span)
+        out_rings[ring_idx] = _splice(coastline[ring_idx], kept)
 
     with open(OUT_PATH, "w") as f:
-        json.dump(kept, f, separators=(",", ":"))
+        json.dump(out_rings, f, separators=(",", ":"))
 
     print(f"{len(counties)} county rings -> {len(singleton_edges)} singleton edges -> "
-          f"{len(chains)} chains -> kept {len(kept)} ({dropped} dropped as inland, "
-          f"almost certainly the NI border), {sum(len(c) for c in kept)} total points")
+          f"{len(chains)} chains -> {matched} spliced into {len(per_ring_matches)} base ring(s), "
+          f"{dropped} dropped (no matching base ring within {MAX_MATCH_DISTANCE_KM}km on both ends)")
     print(f"wrote {OUT_PATH}")
 
 

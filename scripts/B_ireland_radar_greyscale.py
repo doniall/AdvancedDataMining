@@ -775,15 +775,16 @@ def _draw_solis_strip(d, x0, x1, H, solis):
 
 def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None, zoom=False,
            rings_CoastDraw=None):
-    """rings_CoastDraw, if given (see load_precise_coastline()), is drawn as
-    ADDED detail on top of rings_Coast, not a replacement for it: the
-    precise chains are open fragments between county-border junctions, with
-    real gaps wherever a county boundary follows a river inland instead of
-    the coast itself (e.g. the Boyne estuary) -- rings_Coast, one
-    continuous ring, is drawn first as a gapless base so those gaps just
-    show the coarser line beneath rather than a break in the coastline.
-    rings_Coast alone (not rings_CoastDraw) still drives the land mask
-    below, which needs its closed rings."""
+    """rings_CoastDraw, if given (see load_precise_coastline()), is what
+    actually gets drawn as the coastline stroke -- it's already a complete,
+    self-contained replacement for rings_Coast (same rings, just spliced
+    with finer detail from ireland_counties.json where available), not an
+    extra layer drawn on top of it -- drawing both independently produced
+    visible ghosting wherever the two datasets disagreed by a pixel or two.
+    Defaults to rings_Coast when not given. rings_Coast itself still drives
+    the land mask below regardless, which needs its own closed rings."""
+    if rings_CoastDraw is None:
+        rings_CoastDraw = rings_Coast
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -831,13 +832,9 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     d = ImageDraw.Draw(img)
     for ring in rings_County:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COUNTY_LINE, width=1)
-    for ring in rings_Coast:                        # halo, then line, drawn over the rain
+    for ring in rings_CoastDraw:                    # halo, then line, drawn over the rain
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_HALO, width=3, joint="curve")
-    for ring in rings_Coast:
-        d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
-    for ring in rings_CoastDraw or []:              # added detail on top -- see docstring above
-        d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_HALO, width=3, joint="curve")
-    for ring in rings_CoastDraw or []:
+    for ring in rings_CoastDraw:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
 
     # trails and marks are drawn in separate passes below, not interleaved
