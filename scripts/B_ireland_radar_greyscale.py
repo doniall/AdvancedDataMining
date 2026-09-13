@@ -209,6 +209,16 @@ SHIP_TRAIL_FADE_MINUTES = SHIP_TRAIL_WINDOW_MINUTES   # trail segments fade out 
                                     # segment older than 2h already fully faded to
                                     # invisible, defeating the point of a 24h trail
 
+SHIP_TRAIL_WINDOW_MINUTES_ZOOMED = 3 * 60   # zoomed frames use a much shorter trail --
+                                    # 24h of movement across a whole-Ireland view compresses
+                                    # into a short, easy-to-read line, but the same 24h across
+                                    # a 200km-wide zoomed view sprawls into a tangle covering
+                                    # most of the frame (a ship can easily cross the entire
+                                    # zoomed window in well under a day). Fades over this same
+                                    # (shorter) window too -- see render()'s trail_fade_minutes
+                                    # -- so segments still fade out at a sensible rate rather
+                                    # than barely fading at all across a 3h span sized for 24h.
+
 
 def load_ship_history():
     """Per-ship position history recorded by D_ship_ais.py -- {} (no markers)
@@ -275,13 +285,17 @@ def solis_at(history, at_time):
     return min(history, key=lambda r: abs((dt.datetime.fromisoformat(r["fetched_at"]) - at_time).total_seconds()))
 
 
-def ships_at(history, at_time):
+def ships_at(history, at_time, trail_window_minutes=SHIP_TRAIL_WINDOW_MINUTES):
     """Current position + up to the last SHIP_TRAIL_MAX_POINTS prior recorded
     positions for each ship, as of at_time -- the frame's own timestamp, not
     whenever this script happens to run. That's what lets a backlog of radar
     frames each show ships as they actually were at that frame's time,
     instead of all showing today's living AIS position stamped onto every
-    one of them."""
+    one of them.
+
+    trail_window_minutes overrides how far back the trail reaches (see
+    SHIP_TRAIL_WINDOW_MINUTES_ZOOMED) -- how long a ship keeps showing AT
+    ALL is still governed by SHIP_MAX_AGE_MINUTES regardless."""
     out = []
     for samples in history.values():
         now_s = _sample_at_or_before(samples, at_time)
@@ -291,7 +305,7 @@ def ships_at(history, at_time):
         if (at_time - now_t).total_seconds() / 60 > SHIP_MAX_AGE_MINUTES:
             continue
 
-        window_start = now_t - dt.timedelta(minutes=SHIP_TRAIL_WINDOW_MINUTES)
+        window_start = now_t - dt.timedelta(minutes=trail_window_minutes)
         prior = sorted(
             (s for s in samples if window_start <= dt.datetime.fromisoformat(s["t"]) < now_t),
             key=lambda s: s["t"],
@@ -938,8 +952,14 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
             ship_old_coverage = Image.new("L", img.size, 0)
             ship_old_coverage_draw = ImageDraw.Draw(ship_old_coverage)
 
+            # zoomed frames are built from ships_at()'s shorter, zoomed trail
+            # window (see SHIP_TRAIL_WINDOW_MINUTES_ZOOMED) -- fading over
+            # that same shorter window keeps the fade rate sensible instead
+            # of barely fading at all across a short trail sized for a much
+            # longer denominator
+            trail_fade_minutes = SHIP_TRAIL_WINDOW_MINUTES_ZOOMED if zoom else SHIP_TRAIL_FADE_MINUTES
             for i in range(len(pts) - 1):
-                seg_frac = min(max(ages[i] / SHIP_TRAIL_FADE_MINUTES, 0), 1)
+                seg_frac = min(max(ages[i] / trail_fade_minutes, 0), 1)
                 seg_fill = max(round(SHIP_MARK + seg_frac * (BACKGROUND - SHIP_MARK)), mark_fill)
                 if i == newest_i:
                     ship_new_draw.line([pts[i], pts[i + 1]], fill=SHIP_HALO, width=3, joint="curve")
@@ -1063,13 +1083,17 @@ def main():
         # they are right now.
         ships_at_time = dt.datetime.now(dt.timezone.utc) if imgpath == png_files[-1] else at_time
         ships = ships_at(ship_history, ships_at_time)
+        # a shorter trail window -- see SHIP_TRAIL_WINDOW_MINUTES_ZOOMED --
+        # otherwise a ship's full 24h of movement sprawls across most of a
+        # 200km-wide zoomed frame
+        ships_zoomed = ships_at(ship_history, ships_at_time, trail_window_minutes=SHIP_TRAIL_WINDOW_MINUTES_ZOOMED)
         solis = solis_at(solis_history, at_time)
         img = render(src, load_counties(), load_coastline(), frame_time, ships, solis,
                      rings_CoastDraw=load_precise_coastline())
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
 
         os.makedirs(GreyscaleZoomedRadarImageSubfolder, exist_ok=True)
-        zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships, solis, zoom=True,
+        zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships_zoomed, solis, zoom=True,
                             rings_CoastDraw=load_precise_coastline())
         zoomed_img.save(f"{GreyscaleZoomedRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
