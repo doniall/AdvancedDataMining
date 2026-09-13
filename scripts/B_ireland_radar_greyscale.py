@@ -182,6 +182,10 @@ SOLIS_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "s
 # how a ship's "now" position and trail are picked out of its recorded
 # history, relative to the timestamp of the frame being rendered (not
 # wall-clock time -- see ships_at())
+SHIP_STATUS_MOORED = 5             # ITU-R M.1371 NavigationalStatus code -- see ships_at():
+                                    # a moored ship sitting at the exact same position as its
+                                    # own last report is excluded entirely, rather than shown
+                                    # as a static mark cluttering the map at a berth
 SHIP_MAX_AGE_MINUTES = 120         # how much of a ship's history D_ship_ais.py's
                                     # HISTORY_RETENTION_MINUTES keeps and how much of it
                                     # gets DRAWN are deliberately separate: D can retain
@@ -304,6 +308,23 @@ def ships_at(history, at_time, trail_window_minutes=SHIP_TRAIL_WINDOW_MINUTES):
         now_t = dt.datetime.fromisoformat(now_s["t"])
         if (at_time - now_t).total_seconds() / 60 > SHIP_MAX_AGE_MINUTES:
             continue
+
+        # a moored ship still sitting exactly where its own last report had
+        # it isn't giving anyone new information -- excluded outright,
+        # rather than shown as a static mark. Checked against the FULL
+        # history (not just the trail window below), so a ship moored
+        # longer than that window is still excluded, not just untrailed.
+        # Old samples recorded before "status" existed just have status
+        # None here, which never matches SHIP_STATUS_MOORED -- no migration
+        # needed.
+        if now_s.get("status") == SHIP_STATUS_MOORED:
+            prev_s = max(
+                (s for s in samples if dt.datetime.fromisoformat(s["t"]) < now_t),
+                key=lambda s: s["t"],
+                default=None,
+            )
+            if prev_s is not None and prev_s.get("lat") == now_s.get("lat") and prev_s.get("lon") == now_s.get("lon"):
+                continue
 
         window_start = now_t - dt.timedelta(minutes=trail_window_minutes)
         prior = sorted(

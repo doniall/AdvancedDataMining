@@ -88,6 +88,11 @@ def _handle_message(raw, ships):
         "lon": report.get("Longitude"),
         "heading": report.get("TrueHeading"),   # 511 = not available
         "cog": report.get("Cog"),               # course over ground, degrees
+        "status": report.get("NavigationalStatus"),   # ITU-R M.1371 code, e.g. 5 = moored,
+                                                        # 1 = at anchor, 15 = not defined/default --
+                                                        # set manually by the crew, not derived from
+                                                        # motion, so treat it as self-reported, not
+                                                        # ground truth (stale if never updated)
     }
 
 
