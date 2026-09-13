@@ -695,6 +695,8 @@ def _draw_solis_strip(d, x0, x1, H, solis):
 
     y = stat("PRODUCED TODAY", _fmt_stat(solis.get("today_kwh"), "kWh", 1), y)
     y = stat("USED TODAY", _fmt_stat(solis.get("today_consumption_kwh"), "kWh", 1), y)
+    y = stat("BATTERY CHARGED TODAY", _fmt_stat(solis.get("battery_charge_today_kwh"), "kWh", 1), y)
+    y = stat("BATTERY DISCHARGED TODAY", _fmt_stat(solis.get("battery_discharge_today_kwh"), "kWh", 1), y)
     y = stat("EXPORTED TODAY", _fmt_stat(solis.get("today_export_kwh"), "kWh", 1), y)
     y = stat("IMPORTED TODAY", _fmt_stat(solis.get("today_import_kwh"), "kWh", 1), y)
 
