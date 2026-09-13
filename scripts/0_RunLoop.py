@@ -24,8 +24,13 @@ import subprocess
 import sys
 import time
 
+<<<<<<< Updated upstream
 INTERVAL_SECONDS = 5 * 60   # 5 min
 DURATION_SECONDS = 60 * 60  # 1 hour
+=======
+INTERVAL_SECONDS = 5* 60    # 5 min 
+DURATION_SECONDS = 24*60 * 60      # 24 hour
+>>>>>>> Stashed changes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
