@@ -29,6 +29,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# git status --porcelain's two-letter codes for a path still mid-conflict
+# from an earlier, never-finished pull/merge -- git itself refuses to stash
+# these ("needs merge"), so this checks for them up front and stops with a
+# clear message instead of surfacing that raw, confusing git error.
+UNMERGED_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+
 
 def run(args, check=True):
     result = subprocess.run(args, cwd=HERE, capture_output=True, text=True)
@@ -47,6 +53,24 @@ def main():
     print(f"on branch {branch!r}")
 
     status = run(["git", "status", "--porcelain"]).stdout
+
+    unmerged = [line[3:] for line in status.splitlines() if line[:2] in UNMERGED_CODES]
+    if unmerged:
+        print("STOPPED: there's an unresolved merge conflict already sitting in this "
+              "working copy, left over from an earlier pull/merge that was never "
+              "finished (no `git add` + `git commit` to conclude it):")
+        for path in unmerged:
+            print(f"  {path}")
+        print(
+            "\nCan't safely stash or pull until that's resolved -- git won't let a "
+            "stash snapshot a path mid-conflict. Fix it by hand: open the file(s) "
+            "above, resolve the <<<<<<< / ======= / >>>>>>> markers, then:\n"
+            "  git add <file>\n"
+            "  git commit --no-edit\n"
+            "then re-run this script."
+        )
+        sys.exit(1)
+
     has_local_changes = bool(status.strip())
 
     if has_local_changes:
