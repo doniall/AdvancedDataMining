@@ -7,14 +7,14 @@ to ship_history.json -- a per-ship log of recent positions -- so
 B_ireland_radar_greyscale.py can draw both a ship's current position and a
 trail through its last few recorded ones.
 
-Meant to be run on its own schedule (its own cron/scheduler entry) every
-MIN_FETCH_INTERVAL_MINUTES, independent of 0_Run_Radar_And_Greyscale.py's
-own cadence -- main() no-ops if called again before that interval has
-passed, so it's harmless to also call it from there if you want a fallback
-trigger. Each successful run appends one snapshot per ship; a ship's most
-recent position is kept in the file for HISTORY_RETENTION_MINUTES after it
-was last seen, then pruned -- that's storage retention only, independent of
-how much of it B_ireland_radar_greyscale.py actually renders (see its own
+Has no cadence of its own -- every call to main() does a real fetch. How
+often that happens is entirely up to whatever calls it (0_Run_Radar_And_
+Greyscale.py's own cadence, an external scheduler, etc.), not something
+this script tries to self-throttle. Each successful run appends one
+snapshot per ship; a ship's most recent position is kept in the file for
+HISTORY_RETENTION_MINUTES after it was last seen, then pruned -- that's
+storage retention only, independent of how much of it
+B_ireland_radar_greyscale.py actually renders (see its own
 SHIP_MAX_AGE_MINUTES / SHIP_TRAIL_WINDOW_MINUTES).
 
 AIS ("Automatic Identification System") is the shipborne transponder itself --
@@ -55,10 +55,7 @@ API_KEY = os.environ.get("AISSTREAM_API_KEY", "")
 # view exactly -- ships outside the frame just won't show.
 BOUNDING_BOX = [[[49.5, -11.5], [56.0, -3.5]]]
 
-LISTEN_SECONDS = 90   # how long to sit on the stream before saving what arrived --
-                       # meant to be run independently (its own cron/scheduler
-                       # entry) every MIN_FETCH_INTERVAL_MINUTES, not called from
-                       # 0_Run_Radar_And_Greyscale.py's own cadence
+LISTEN_SECONDS = 90   # how long to sit on the stream before saving what arrived
 
 # a ship's last recorded position is kept for this long after it was last
 # seen, then pruned -- this is STORAGE retention, purely how long
@@ -70,13 +67,7 @@ LISTEN_SECONDS = 90   # how long to sit on the stream before saving what arrived
 # wants it.
 HISTORY_RETENTION_MINUTES = 7 * 24 * 60   # 7 days
 
-# don't hit aisstream.io more often than this -- calling main() more
-# frequently (e.g. from a tight cron loop or every time 0_Run_* fires) just
-# no-ops until enough time has passed since the last attempt
-MIN_FETCH_INTERVAL_MINUTES = 5
-
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
-LAST_FETCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_ais_last_fetch.txt")
 
 
 def _handle_message(raw, ships):
@@ -108,10 +99,9 @@ async def collect():
     in practice ("no close frame received or sent"): aisstream's websocket
     can disconnect mid-listen without a clean closing handshake. Without a
     retry, a drop early in the 90s window ends the whole fetch with
-    whatever few ships it caught before then, and the next attempt is a
-    full MIN_FETCH_INTERVAL_MINUTES away. The retry reconnects fresh but
-    keeps the SAME deadline (doesn't restart a new 90s budget), so a drop
-    still can't turn one fetch into a much longer one."""
+    whatever few ships it caught before then. The retry reconnects fresh
+    but keeps the SAME deadline (doesn't restart a new 90s budget), so a
+    drop still can't turn one fetch into a much longer one."""
     ships = {}
     deadline = time.monotonic() + LISTEN_SECONDS
     attempts_left = 2
@@ -162,19 +152,6 @@ def _prune(history, now):
     return history
 
 
-def _last_fetch_time():
-    if not os.path.exists(LAST_FETCH_PATH):
-        return None
-    with open(LAST_FETCH_PATH) as f:
-        s = f.read().strip()
-    return dt.datetime.fromisoformat(s) if s else None
-
-
-def _record_fetch_time(t):
-    with open(LAST_FETCH_PATH, "w") as f:
-        f.write(t.isoformat())
-
-
 def main():
     if websockets is None:
         print("The 'websockets' package isn't installed -- run: pip3 install websockets")
@@ -185,14 +162,6 @@ def main():
               "file). Nothing fetched; rendering will proceed without ship markers.")
         return
 
-    last_fetch = _last_fetch_time()
-    if last_fetch is not None:
-        elapsed = (dt.datetime.now(dt.timezone.utc) - last_fetch).total_seconds() / 60
-        if elapsed < MIN_FETCH_INTERVAL_MINUTES:
-            print(f"last AIS fetch was {elapsed:.1f} min ago -- minimum cadence is "
-                  f"{MIN_FETCH_INTERVAL_MINUTES} min, skipping this run")
-            return
-
     print(f"listening for AIS position reports for {LISTEN_SECONDS}s...")
     ships = asyncio.run(collect())
 
@@ -201,9 +170,6 @@ def main():
     # lag is seconds, negligible against the trail this feeds
     now = dt.datetime.now(dt.timezone.utc)
     stamp = now.isoformat()
-    _record_fetch_time(now)   # recorded even on a connection failure (ships
-                               # empty) -- a broken key/network won't retry
-                               # more often than MIN_FETCH_INTERVAL_MINUTES
 
     history = _load_history()
     for mmsi, ship in ships.items():
