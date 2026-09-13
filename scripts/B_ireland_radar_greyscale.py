@@ -164,6 +164,18 @@ def load_counties():
     with open(os.path.join(here, "ireland_counties.json")) as f:
         return [np.array(r, float) for r in json.load(f)]
 
+def load_precise_coastline():
+    """Higher-resolution coastline for DRAWING only, derived from
+    ireland_counties.json's finer per-county digitization (see
+    _build_precise_coastline.py) -- ~3x the vertex count of
+    ireland_coastline.json. Draw-only: these are mostly open chains
+    between county-border junctions, not closed landmass loops, so they
+    can't stand in for load_coastline()'s role in the land mask (see
+    render()), which needs genuinely closed rings."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "ireland_coastline_precise.json")) as f:
+        return [np.array(r, float) for r in json.load(f)]
+
 SHIP_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ship_history.json")
 SOLIS_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solis_history.json")
 
@@ -761,7 +773,17 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     wline("Sun", sun_str, y)
 
 
-def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None, zoom=False):
+def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None, zoom=False,
+           rings_CoastDraw=None):
+    """rings_CoastDraw, if given (see load_precise_coastline()), is drawn as
+    ADDED detail on top of rings_Coast, not a replacement for it: the
+    precise chains are open fragments between county-border junctions, with
+    real gaps wherever a county boundary follows a river inland instead of
+    the coast itself (e.g. the Boyne estuary) -- rings_Coast, one
+    continuous ring, is drawn first as a gapless base so those gaps just
+    show the coarser line beneath rather than a break in the coastline.
+    rings_Coast alone (not rings_CoastDraw) still drives the land mask
+    below, which needs its closed rings."""
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -812,6 +834,10 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
     for ring in rings_Coast:                        # halo, then line, drawn over the rain
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_HALO, width=3, joint="curve")
     for ring in rings_Coast:
+        d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
+    for ring in rings_CoastDraw or []:              # added detail on top -- see docstring above
+        d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_HALO, width=3, joint="curve")
+    for ring in rings_CoastDraw or []:
         d.line([ll2r(lo, la) for lo, la in ring], fill=COAST_LINE, width=3, joint="curve")
 
     # trails and marks are drawn in separate passes below, not interleaved
@@ -1032,11 +1058,13 @@ def main():
         at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
         ships = ships_at(ship_history, at_time)
         solis = solis_at(solis_history, at_time)
-        img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
+        img = render(src, load_counties(), load_coastline(), frame_time, ships, solis,
+                     rings_CoastDraw=load_precise_coastline())
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
 
         os.makedirs(GreyscaleZoomedRadarImageSubfolder, exist_ok=True)
-        zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships, solis, zoom=True)
+        zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships, solis, zoom=True,
+                            rings_CoastDraw=load_precise_coastline())
         zoomed_img.save(f"{GreyscaleZoomedRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
