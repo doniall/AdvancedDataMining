@@ -24,8 +24,8 @@ import subprocess
 import sys
 import time
 
-INTERVAL_SECONDS = 5 * 60 + 1   # 5 min 1 s
-DURATION_SECONDS = 60 * 60      # 1 hour
+INTERVAL_SECONDS = 5 * 60   # 5 min
+DURATION_SECONDS = 60 * 60  # 1 hour
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 

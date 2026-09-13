@@ -40,14 +40,15 @@ SETUP
 Run:   python3 G_solis_fetch.py
 Needs: nothing beyond the standard library.
 
-RETRIES AND BACKOFF
-    A failed request is retried once immediately (REQUEST_RETRIES). If
-    SolisCloud keeps failing across separate runs of this script (e.g. it's
-    called every few minutes from 0_Run_Radar_And_Greyscale.py), the wait
-    before trying again grows via BACKOFF_SCHEDULE_MINUTES instead of
-    hammering an unhealthy backend on every cycle -- state for this lives in
-    solis_fetch_state.json, separate from solis_status.json (which only
-    updates on success, so the display always shows the last real data).
+RETRIES
+    A failed request is retried once immediately (REQUEST_RETRIES). Beyond
+    that, this has no cadence or backoff of its own -- every call to
+    main() makes a real attempt, whether it just failed a moment ago or
+    not. How often that happens at all is entirely up to whatever calls
+    it (0_Run_Radar_And_Greyscale.py, 0_RunLoop.py, an external
+    scheduler), not something this script tries to self-throttle.
+    solis_status.json only updates on success, so the display always
+    shows the last real data even through a run of failures.
 
 NOTE ON FIELD NAMES
     SolisCloud's stationDetail response isn't consistently documented, and
@@ -100,19 +101,12 @@ USER_STATION_LIST_PATH = "/v1/api/userStationList"
 STATION_DETAIL_PATH = "/v1/api/stationDetail"
 STATION_DAY_PATH = "/v1/api/stationDay"
 
-# a healthy run has no minimum interval of its own -- SolisCloud enforces
-# its own rate limits, and how often this gets called at all is governed by
-# how often 0_Run_Radar_And_Greyscale.py itself runs. Only a run of
-# consecutive failures throttles further attempts, via BACKOFF_SCHEDULE_MINUTES
-# below.
-
-# after N consecutive failed attempts (network timeout, 502, or Solis's own
-# "try again later"), wait this many minutes before trying again -- during a
-# sustained outage every attempt still costs up to REQUEST_TIMEOUT_SECONDS *
-# (REQUEST_RETRIES + 1), and without this a pipeline firing every few minutes
-# would eat that cost on every single cycle for as long as Solis stays down.
-# Index = consecutive failures so far, clamped to the last entry.
-BACKOFF_SCHEDULE_MINUTES = [5, 10, 20, 40, 60]
+# no minimum interval and no failure backoff -- how often this gets called
+# at all is governed entirely by whatever calls it, not by anything in
+# here. A sustained SolisCloud outage means every call still pays up to
+# REQUEST_TIMEOUT_SECONDS * (REQUEST_RETRIES + 1), but that cost is the
+# caller's to manage (e.g. via its own scheduling interval), not this
+# script's to hide behind a self-imposed wait.
 
 # SolisCloud's authenticated endpoints (stationDetail/inverterDetail
 # especially) are reported elsewhere as slow or intermittently flaky under
@@ -123,8 +117,9 @@ BACKOFF_SCHEDULE_MINUTES = [5, 10, 20, 40, 60]
 # "try again") or a full hang to the timeout -- no case yet of a slow-but-
 # real response arriving late, so a shorter timeout mainly cuts wasted wait
 # on hangs rather than risking a real response getting cut off. One retry
-# covers a lone blip within a single run; BACKOFF_SCHEDULE_MINUTES above
-# covers a sustained outage across runs.
+# covers a lone blip within a single call; a sustained outage across
+# separate calls is the caller's scheduling interval to manage, not
+# anything tracked here.
 REQUEST_TIMEOUT_SECONDS = 15
 REQUEST_RETRIES = 1
 REQUEST_RETRY_DELAY_SECONDS = 5
@@ -151,7 +146,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(HERE, "solis_status.json")
 DEVICE_PATH = os.path.join(HERE, "solis_device.json")   # curated, no "raw" -- meant to be served
                                                           # to the E1003 itself; see main()
-STATE_PATH = os.path.join(HERE, "solis_fetch_state.json")   # last attempt time + consecutive failures, see BACKOFF_SCHEDULE_MINUTES
 HISTORY_PATH = os.path.join(HERE, "solis_history.json")     # every successful reading, see _append_history()
 
 # how long solis_history.json keeps a reading around -- same convention and
@@ -424,21 +418,6 @@ def _pick(data, candidates):
     return None, None
 
 
-def _load_state():
-    if not os.path.exists(STATE_PATH):
-        return {"last_attempt_at": None, "consecutive_failures": 0}
-    try:
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"last_attempt_at": None, "consecutive_failures": 0}
-
-
-def _save_state(state):
-    with open(STATE_PATH, "w") as f:
-        json.dump(state, f)
-
-
 def _load_history():
     if not os.path.exists(HISTORY_PATH):
         return []
@@ -469,36 +448,11 @@ def _append_history(status):
         json.dump(history, f, separators=(",", ":"))
 
 
-def _backoff_wait_minutes(consecutive_failures):
-    return BACKOFF_SCHEDULE_MINUTES[min(consecutive_failures, len(BACKOFF_SCHEDULE_MINUTES)) - 1]
-
-
-def _due(state):
-    """A healthy state (no consecutive failures) is always due -- only a
-    run of failures throttles further attempts, via BACKOFF_SCHEDULE_MINUTES."""
-    consecutive_failures = state.get("consecutive_failures", 0)
-    if not consecutive_failures or not state.get("last_attempt_at"):
-        return True
-    wait_minutes = _backoff_wait_minutes(consecutive_failures)
-    last_attempt = dt.datetime.fromisoformat(state["last_attempt_at"])
-    age_minutes = (dt.datetime.now(dt.timezone.utc) - last_attempt).total_seconds() / 60
-    return age_minutes >= wait_minutes
-
-
 def main():
     if not (KEY_ID and KEY_SECRET):
         print("SOLIS_KEY_ID / SOLIS_KEY_SECRET not set -- skipping SolisCloud fetch "
               "(see the setup notes at the top of this file)")
         return
-
-    state = _load_state()
-    if not _due(state):
-        wait_minutes = _backoff_wait_minutes(state.get("consecutive_failures", 0))
-        print(f"last SolisCloud attempt failed {state.get('consecutive_failures', 0)}x in a row; "
-              f"waiting {wait_minutes} min before retrying -- skipping this run")
-        return
-
-    state["last_attempt_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
     try:
         if STATION_ID:
@@ -509,11 +463,7 @@ def main():
             print(f"using station id {station_id!r} (discovered via userStationList)")
         data = fetch_station_detail(station_id)
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError, KeyError) as e:
-        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
-        _save_state(state)
-        next_wait = _backoff_wait_minutes(state["consecutive_failures"])
-        print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place "
-              f"(consecutive failures: {state['consecutive_failures']}, next attempt in {next_wait} min)")
+        print(f"SolisCloud fetch failed ({e}); leaving existing solis_status.json in place")
         return
 
     power_kw, power_unit = _pick(data, POWER_NOW_CANDIDATES)
@@ -613,9 +563,6 @@ def main():
         json.dump(device_view, f, separators=(",", ":"))
 
     _append_history(status)
-
-    state["consecutive_failures"] = 0
-    _save_state(state)
 
     print(f"SolisCloud: {power_kw} kW now, {today_kwh} kWh today, battery {battery_pct}%")
 
