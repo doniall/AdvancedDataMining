@@ -3,8 +3,9 @@
 H_sensecraft_push.py
 
 Pushes the latest Solis snapshot (solis_device.json, written by
-G_solis_fetch.py) AND the latest IMAGE_PUSH_COUNT rendered greyscale radar
-frames (1_GreyscalePNG/, written by B_ireland_radar_greyscale.py) to
+G_solis_fetch.py), the latest IMAGE_PUSH_COUNT rendered greyscale radar
+frames (1_GreyscalePNG/), and the latest zoomed frame (2_Greyscale_ZoomedPNG/,
+centered on LOCATION_LAT/LON -- see B_ireland_radar_greyscale.py) to
 SenseCraft's own cloud API, instead of relying on the E1003's
 "External API Configuration" widget to pull either from somewhere we host.
 
@@ -32,20 +33,22 @@ IMAGES -- WHY THESE ARE URLS, NOT PUSHED BYTES
     us skip hosting for images the way it does for the plain Solis numbers.
 
     _publish_images_to_github() covers that: it commits the latest
-    IMAGE_PUSH_COUNT greyscale frames under fixed filenames
-    (frame_1.png..frame_N.png, newest first) to a dedicated branch
-    (IMAGE_BRANCH) of this repo's own origin remote, via a throwaway git
-    worktree -- never touches whatever branch is actually checked out for
-    development. Fixed filenames mean the resulting
-    raw.githubusercontent.com URLs never change, only what they point to --
-    so image_N fields, once selected in the dashboard, keep working across
-    every push. Requires this repo to be public (raw.githubusercontent.com
-    serves private repos' files only with an auth token, which the
-    SenseCraft-side fetch has no way to supply) and that the pipeline's own
-    git push access covers this repo's origin remote.
+    IMAGE_PUSH_COUNT greyscale frames, plus the latest zoomed frame, under
+    fixed filenames (frame_1.png..frame_N.png, and frame_1_zoomed.png,
+    newest first) to a dedicated branch (IMAGE_BRANCH) of this repo's own
+    origin remote, via a throwaway git worktree -- never touches whatever
+    branch is actually checked out for development. Fixed filenames mean
+    the resulting raw.githubusercontent.com URLs never change, only what
+    they point to -- so image_N/Image_1_Zoomed fields, once selected in the
+    dashboard, keep working across every push. Requires this repo to be
+    public (raw.githubusercontent.com serves private repos' files only with
+    an auth token, which the SenseCraft-side fetch has no way to supply)
+    and that the pipeline's own git push access covers this repo's origin
+    remote.
 
-    image_N_time is that frame's own UTC timestamp (parsed from its
-    filename), for confirming freshness against image_N itself.
+    image_N_time / Image_1_Zoomed_time is that frame's own UTC timestamp
+    (parsed from its filename), for confirming freshness against image_N /
+    Image_1_Zoomed itself.
 
 Run:   python3 H_sensecraft_push.py
 Needs: nothing beyond the standard library, and `git` on PATH with push
@@ -68,10 +71,12 @@ REQUEST_TIMEOUT_SECONDS = 15
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEVICE_PATH = os.path.join(HERE, "solis_device.json")   # written by G_solis_fetch.py
-# same literal B_ireland_radar_greyscale.py uses for GreyscaleRadarImageSubfolder --
-# duplicated here rather than imported, to avoid pulling in that whole module
-# (PIL, coastline/counties loading) just for a folder name
+# same literals B_ireland_radar_greyscale.py uses for GreyscaleRadarImageSubfolder
+# and GreyscaleZoomedRadarImageSubfolder -- duplicated here rather than
+# imported, to avoid pulling in that whole module (PIL, coastline/counties
+# loading) just for two folder names
 GREYSCALE_DIR = os.path.join(HERE, "1_GreyscalePNG")
+GREYSCALE_ZOOMED_DIR = os.path.join(HERE, "2_Greyscale_ZoomedPNG")
 LAST_PUSHED_PATH = os.path.join(HERE, "sensecraft_last_pushed.json")
 
 # was 20, built for cycling through recent frames -- confirmed not
@@ -101,14 +106,17 @@ def _flatten(device_view):
     return flat
 
 
-def _latest_greyscale_filenames(n=IMAGE_PUSH_COUNT):
+def _latest_filenames(directory, n):
     """Filenames are UTC timestamp stems (see B_ireland_radar_greyscale.py's
     own "src" timestamp comment), so a plain lexicographic sort is
     chronological -- same assumption that script's own frame-diffing already
-    relies on. Returns the n most recent, newest first."""
-    if not os.path.isdir(GREYSCALE_DIR):
+    relies on. Returns the n most recent, newest first. Works for both
+    GREYSCALE_DIR and GREYSCALE_ZOOMED_DIR -- they're always produced
+    together, one file per timestamp in each, by B_ireland_radar_greyscale.py's
+    own main()."""
+    if not os.path.isdir(directory):
         return []
-    names = sorted(f for f in os.listdir(GREYSCALE_DIR) if f.lower().endswith(".png"))
+    names = sorted(f for f in os.listdir(directory) if f.lower().endswith(".png"))
     return list(reversed(names[-n:]))
 
 
@@ -145,15 +153,16 @@ def _origin_owner_repo():
     raise RuntimeError(f"origin remote {url!r} doesn't look like a GitHub URL")
 
 
-def _publish_images_to_github(filenames):
-    """Commits `filenames` (from GREYSCALE_DIR, newest first) to fixed
-    names (frame_1.png..frame_N.png) on IMAGE_BRANCH of this repo's origin
-    remote, and returns their raw.githubusercontent.com URLs in the same
-    order -- or None on any failure (git not pushable from here, network,
-    etc.), so main() can skip image fields for this run instead of crashing
-    the whole push. See IMAGES docstring above for why this exists."""
-    if not filenames:
-        return []
+def _publish_images_to_github(files):
+    """Commits `files` ([(source_path, dest_filename), ...]) under their
+    fixed dest_filename (e.g. frame_1.png, frame_1_zoomed.png) on
+    IMAGE_BRANCH of this repo's origin remote, and returns
+    {dest_filename: raw.githubusercontent.com URL} -- or None on any
+    failure (git not pushable from here, network, etc.), so main() can skip
+    image fields for this run instead of crashing the whole push. See
+    IMAGES docstring above for why this exists."""
+    if not files:
+        return {}
 
     try:
         repo_root = _repo_root()
@@ -188,17 +197,17 @@ def _publish_images_to_github(filenames):
         for old in os.listdir(tmp_dir):
             if old.lower().endswith(".png"):
                 os.remove(os.path.join(tmp_dir, old))
-        for i, filename in enumerate(filenames, start=1):
-            shutil.copyfile(os.path.join(GREYSCALE_DIR, filename), os.path.join(tmp_dir, f"frame_{i}.png"))
+        for source_path, dest_filename in files:
+            shutil.copyfile(source_path, os.path.join(tmp_dir, dest_filename))
 
         _run(["git", "add", "-A"], cwd=tmp_dir)
         status = _run(["git", "status", "--porcelain"], cwd=tmp_dir)
         if status.stdout.strip():
             _run(["git", "-c", "user.email=solis-pipeline@localhost", "-c", "user.name=Solis Pipeline",
-                  "commit", "-q", "-m", f"latest {len(filenames)} greyscale frame(s)"], cwd=tmp_dir)
+                  "commit", "-q", "-m", f"latest {len(files)} image(s)"], cwd=tmp_dir)
             _run(["git", "push", "-q", GIT_REMOTE, f"HEAD:{IMAGE_BRANCH}"], cwd=tmp_dir)
         else:
-            print(f"{IMAGE_BRANCH} already has this exact frame set -- nothing to commit")
+            print(f"{IMAGE_BRANCH} already has this exact image set -- nothing to commit")
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "").strip()
         print(f"publishing images to GitHub failed ({e}); {stderr}")
@@ -208,18 +217,10 @@ def _publish_images_to_github(filenames):
         shutil.rmtree(tmp_dir, ignore_errors=True)
         _run(["git", "worktree", "prune"], cwd=repo_root, check=False)
 
-    return [
-        f"https://raw.githubusercontent.com/{owner_repo}/{IMAGE_BRANCH}/frame_{i}.png"
-        for i in range(1, len(filenames) + 1)
-    ]
-
-
-def _image_fields(urls, filenames):
-    fields = {}
-    for i, (url, filename) in enumerate(zip(urls, filenames), start=1):
-        fields[f"image_{i}"] = url
-        fields[f"image_{i}_time"] = os.path.splitext(filename)[0]
-    return fields
+    return {
+        dest_filename: f"https://raw.githubusercontent.com/{owner_repo}/{IMAGE_BRANCH}/{dest_filename}"
+        for _, dest_filename in files
+    }
 
 
 def _load_last_pushed():
@@ -232,9 +233,13 @@ def _load_last_pushed():
         return {}
 
 
-def _save_last_pushed(fetched_at, image_filenames):
+def _save_last_pushed(fetched_at, image_filenames, zoomed_filename):
     with open(LAST_PUSHED_PATH, "w") as f:
-        json.dump({"fetched_at": fetched_at, "image_filenames": image_filenames}, f)
+        json.dump({
+            "fetched_at": fetched_at,
+            "image_filenames": image_filenames,
+            "zoomed_filename": zoomed_filename,
+        }, f)
 
 
 def push(data):
@@ -267,26 +272,47 @@ def main():
         print("solis_device.json not found -- pushing images only, if any "
               "(run G_solis_fetch.py for the Solis panel data)")
 
-    image_filenames = _latest_greyscale_filenames()
-    if not device_view and not image_filenames:
+    image_filenames = _latest_filenames(GREYSCALE_DIR, IMAGE_PUSH_COUNT)
+    zoomed_filenames = _latest_filenames(GREYSCALE_ZOOMED_DIR, 1)
+    zoomed_filename = zoomed_filenames[0] if zoomed_filenames else None
+
+    if not device_view and not image_filenames and not zoomed_filename:
         print("nothing to push yet -- no solis_device.json and no images in "
-              "1_GreyscalePNG/ (run G_solis_fetch.py and/or B_ireland_radar_greyscale.py first)")
+              "1_GreyscalePNG/ or 2_Greyscale_ZoomedPNG/ (run G_solis_fetch.py and/or "
+              "B_ireland_radar_greyscale.py first)")
         return
 
     fetched_at = device_view.get("fetched_at")
     last_pushed = _load_last_pushed()
     if (fetched_at and fetched_at == last_pushed.get("fetched_at")
-            and image_filenames == last_pushed.get("image_filenames")):
+            and image_filenames == last_pushed.get("image_filenames")
+            and zoomed_filename == last_pushed.get("zoomed_filename")):
         print("SenseCraft already has this data (nothing new since the last push) -- skipping")
         return
 
-    image_urls = _publish_images_to_github(image_filenames) if image_filenames else []
-    if image_urls is None:
+    files_to_publish = [
+        (os.path.join(GREYSCALE_DIR, name), f"frame_{i}.png")
+        for i, name in enumerate(image_filenames, start=1)
+    ]
+    if zoomed_filename:
+        files_to_publish.append((os.path.join(GREYSCALE_ZOOMED_DIR, zoomed_filename), "frame_1_zoomed.png"))
+
+    urls = _publish_images_to_github(files_to_publish) if files_to_publish else {}
+    if urls is None:
         print("couldn't publish images to GitHub this run -- pushing Solis data without image fields")
-        image_urls, image_filenames = [], []
+        urls, image_filenames, zoomed_filename = {}, [], None
 
     data = _flatten(device_view)
-    data.update(_image_fields(image_urls, image_filenames))
+    for i, name in enumerate(image_filenames, start=1):
+        url = urls.get(f"frame_{i}.png")
+        if url:
+            data[f"image_{i}"] = url
+            data[f"image_{i}_time"] = os.path.splitext(name)[0]
+    if zoomed_filename:
+        zoomed_url = urls.get("frame_1_zoomed.png")
+        if zoomed_url:
+            data["Image_1_Zoomed"] = zoomed_url
+            data["Image_1_Zoomed_time"] = os.path.splitext(zoomed_filename)[0]
 
     try:
         resp = push(data)
@@ -294,9 +320,10 @@ def main():
         print(f"SenseCraft push failed ({e})")
         return
 
-    _save_last_pushed(fetched_at, image_filenames)
+    _save_last_pushed(fetched_at, image_filenames, zoomed_filename)
+    zoomed_note = " + zoomed" if zoomed_filename else ""
     print(f"pushed {len(data)} field(s) to SenseCraft (device {DEVICE_ID}), "
-          f"including {len(image_filenames)} image(s): {resp}")
+          f"including {len(image_filenames)} image(s){zoomed_note}: {resp}")
 
 
 if __name__ == "__main__":

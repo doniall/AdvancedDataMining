@@ -127,7 +127,7 @@ RANGE_GREY = 250
 
 RadarImageSubfolder = "0_RadarPNG"
 GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
-ZoomedRadarImageSubfolder = "2_ZoomedPNG"
+GreyscaleZoomedRadarImageSubfolder = "2_Greyscale_ZoomedPNG"
 
 # ships are drawn near-black with a light halo so they read clearly whether
 # they sit over pale background or dark (heavy-rain) pixels -- the same
@@ -1035,9 +1035,9 @@ def main():
         img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
 
-        os.makedirs(ZoomedRadarImageSubfolder, exist_ok=True)
+        os.makedirs(GreyscaleZoomedRadarImageSubfolder, exist_ok=True)
         zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships, solis, zoom=True)
-        zoomed_img.save(f"{ZoomedRadarImageSubfolder}/{imgpath}")
+        zoomed_img.save(f"{GreyscaleZoomedRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
 
