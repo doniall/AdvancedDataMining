@@ -78,16 +78,11 @@ MAX_MATCH_DISTANCE_KM = 2    # see METHOD step 2 above -- 90% of real chains mat
 
 # A real detail chain is a short LOCAL stretch of coast -- confirmed against
 # a real capture, even a long one (77 points) only spans ~10 ring-index
-# units. A closed ring's start and end index are the same geographic point,
-# which _nearest_on_ring (a plain 0..len(ring) arc position, no wraparound)
-# doesn't know -- a chain that happens to sit near that seam can match near
-# index 0 on one end and near index len(ring) on the other, computing as
-# "nearly the whole ring apart" when really they're adjacent. Confirmed
-# against a real capture: exactly this produced a match spanning 2083 of a
-# 2087-point ring, which then ate almost everything else in _splice. Rather
-# than handle the wraparound properly (rotating the ring, splicing across
-# the seam), such matches are just discarded like any other bad match --
-# the cost is one un-refined chain wherever the seam happens to fall.
+# units (measured circularly -- see _circular_span, which is what makes
+# this cap meaningful: a chain sitting near a closed ring's start/end seam
+# is adjacent there, not "nearly the whole ring apart", so a real one no
+# longer gets wrongly rejected or wrongly treated as huge). This still
+# guards against a genuinely bad match slipping through some other way.
 MAX_SPAN_INDEX = 100
 
 
@@ -193,23 +188,65 @@ def _nearest_on_ring(point, ring):
     return float(d[i]) * 111.0, i + float(t[i])
 
 
-def _splice(ring, matches):
-    """ring: one closed base ring (numpy array). matches: [(start_pos,
-    end_pos, chain_points), ...] already resolved to non-overlapping,
-    correctly-oriented (start_pos < end_pos) splices. Returns a new point
-    list: ring's own points, with each matched span's points replaced by
-    that chain's own points."""
-    matches = sorted(matches, key=lambda m: m[0])
+def _circular_span(pos0, pos1, ring_len_segments):
+    """A closed ring's start and end index are the same geographic point,
+    so the short path between two arc positions can either go the plain
+    way (small pos to large pos) or wrap past that seam -- whichever is
+    shorter. Confirmed against real data: a chain sitting near the seam
+    (e.g. one that happened to fall almost exactly at Rogerstown Estuary)
+    computed a ~2083-unit non-circular span on a 2087-point ring, when the
+    real (wrapped) distance was ~3 units -- treating that as "far apart"
+    caused it to be either wrongly discarded or, worse, wrongly treated as
+    the single largest span and left to consume almost everything else in
+    an early version of this script. Returns (span, wraps, start_pos,
+    end_pos) -- for a wrapping span, start_pos is the position near the
+    ring's end and end_pos the position near its start, i.e. start_pos >
+    end_pos (the reverse of the non-wrapping case), which _splice uses to
+    tell the two apart."""
+    raw = abs(pos1 - pos0)
+    wrapped = ring_len_segments - raw
+    if wrapped < raw:
+        return wrapped, True, max(pos0, pos1), min(pos0, pos1)
+    return raw, False, min(pos0, pos1), max(pos0, pos1)
+
+
+def _splice(ring, normal_matches, wrap_match):
+    """ring: one closed base ring (numpy array, ring[0] == ring[-1]).
+    normal_matches: [(start_pos, end_pos, chain_points), ...], start_pos <
+    end_pos, already resolved to non-overlapping splices strictly between
+    wrap_match's two positions (see main()). wrap_match: (start_pos,
+    end_pos, chain_points) with start_pos > end_pos (see _circular_span),
+    or None if no chain matched across this ring's seam. Returns a new
+    point list, still closed (first point == last point) -- not
+    necessarily starting at the same point the original ring did, which
+    doesn't matter for drawing (PIL just walks the sequence)."""
+    normal_matches = sorted(normal_matches, key=lambda m: m[0])
+
+    if wrap_match is None:
+        out = []
+        cursor = 0.0
+        for start_pos, end_pos, chain_points in normal_matches:
+            i, j = int(np.ceil(cursor)), int(np.floor(start_pos))
+            out.extend(ring[i:j + 1].tolist())
+            out.extend(chain_points)
+            cursor = end_pos
+        out.extend(ring[int(np.ceil(cursor)):].tolist())
+        return out
+
+    # start right after the wrap chain's low (near-ring-start) end, walk
+    # the middle of the ring forward applying normal splices, then close
+    # by appending the wrap chain itself -- its first point lands back
+    # near where this output started, closing the ring
+    w_start, w_end, w_points = wrap_match
     out = []
-    cursor = 0.0
-    for start_pos, end_pos, chain_points in matches:
-        i = int(np.ceil(cursor))
-        j = int(np.floor(start_pos))
+    cursor = w_end
+    for start_pos, end_pos, chain_points in normal_matches:
+        i, j = int(np.ceil(cursor)), int(np.floor(start_pos))
         out.extend(ring[i:j + 1].tolist())
         out.extend(chain_points)
         cursor = end_pos
-    i = int(np.ceil(cursor))
-    out.extend(ring[i:].tolist())
+    out.extend(ring[int(np.ceil(cursor)):int(np.floor(w_start)) + 1].tolist())
+    out.extend(w_points)
     return out
 
 
@@ -228,47 +265,63 @@ def main():
 
     # match each chain's two endpoints against every closed base ring;
     # keep only chains matching the SAME ring within tolerance on both ends
-    per_ring_matches = defaultdict(list)
+    per_ring_matches = defaultdict(list)  # ring_idx -> [(start_pos, end_pos, points, wraps), ...]
     matched, dropped = 0, 0
     for chain in chains:
         if len(chain) < 2:
             continue
-        best = None  # (total_dist, ring_idx, start_pos, end_pos, oriented_points)
+        best = None  # (total_dist, ring_idx, start_pos, end_pos, oriented_points, wraps)
         for ring_idx in closed_ring_idx:
             ring = coastline[ring_idx]
             d0, pos0 = _nearest_on_ring(chain[0], ring)
             d1, pos1 = _nearest_on_ring(chain[-1], ring)
             if d0 > MAX_MATCH_DISTANCE_KM or d1 > MAX_MATCH_DISTANCE_KM:
                 continue
-            if pos0 <= pos1:
-                start_pos, end_pos, points = pos0, pos1, chain
-            else:
-                start_pos, end_pos, points = pos1, pos0, list(reversed(chain))
-            if end_pos - start_pos > MAX_SPAN_INDEX:  # see MAX_SPAN_INDEX docstring above
+            span, wraps, start_pos, end_pos = _circular_span(pos0, pos1, len(ring) - 1)
+            if span > MAX_SPAN_INDEX:  # see MAX_SPAN_INDEX docstring above
                 continue
+            # orientation: non-wrap wants start_pos<end_pos order (pos0<=pos1 already
+            # true from _circular_span), wrap wants the high-to-low seam-crossing order
+            if wraps:
+                points = chain if pos0 > pos1 else list(reversed(chain))
+            else:
+                points = chain if pos0 <= pos1 else list(reversed(chain))
             total = d0 + d1
             if best is None or total < best[0]:
-                best = (total, ring_idx, start_pos, end_pos, points)
+                best = (total, ring_idx, start_pos, end_pos, points, wraps)
         if best is None:
             dropped += 1
             continue
         matched += 1
-        _, ring_idx, start_pos, end_pos, points = best
-        per_ring_matches[ring_idx].append((start_pos, end_pos, points))
+        _, ring_idx, start_pos, end_pos, points, wraps = best
+        per_ring_matches[ring_idx].append((start_pos, end_pos, points, wraps))
 
-    # drop overlapping matches on the same ring, keeping whichever chain is longer
-    # (a real coastal stretch) when two claim over the same span
+    # per ring: pick at most one wrap match (best by total distance -- extremely
+    # rare to have two chains both needing to cross the same seam), drop any
+    # normal match that would overlap it, then drop overlapping NORMAL matches,
+    # keeping whichever chain is longer (a real coastal stretch) when two claim
+    # the same span
     out_rings = list(coastline_raw)
-    for ring_idx, spans in per_ring_matches.items():
-        spans.sort(key=lambda m: m[0])
+    for ring_idx, all_matches in per_ring_matches.items():
+        wrap_candidates = [m for m in all_matches if m[3]]
+        normal = [m[:3] for m in all_matches if not m[3]]
+        wrap_match = None
+        if wrap_candidates:
+            start_pos, end_pos, points, _ = wrap_candidates[0]
+            wrap_match = (start_pos, end_pos, points)
+            # a wrap match's "used" range is [0, end_pos] union [start_pos, ring_len] --
+            # anything a normal match claims outside (end_pos, start_pos) would overlap it
+            normal = [m for m in normal if m[0] > wrap_match[1] and m[1] < wrap_match[0]]
+
+        normal.sort(key=lambda m: m[0])
         kept = []
-        for span in spans:
+        for span in normal:
             if kept and span[0] < kept[-1][1]:
                 if (span[1] - span[0]) > (kept[-1][1] - kept[-1][0]):
                     kept[-1] = span
                 continue
             kept.append(span)
-        out_rings[ring_idx] = _splice(coastline[ring_idx], kept)
+        out_rings[ring_idx] = _splice(coastline[ring_idx], kept, wrap_match)
 
     with open(OUT_PATH, "w") as f:
         json.dump(out_rings, f, separators=(",", ":"))
