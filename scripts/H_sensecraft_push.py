@@ -74,7 +74,12 @@ DEVICE_PATH = os.path.join(HERE, "solis_device.json")   # written by G_solis_fet
 GREYSCALE_DIR = os.path.join(HERE, "1_GreyscalePNG")
 LAST_PUSHED_PATH = os.path.join(HERE, "sensecraft_last_pushed.json")
 
-IMAGE_PUSH_COUNT = 20
+# was 20, built for cycling through recent frames -- confirmed not
+# possible (SenseCraft's own device refresh floor is 5 minutes regardless
+# of panel speed, and even then e-ink can't animate). Only image_1 (the
+# single frame actually shown) matters now; pushing/committing 19 frames
+# nobody ever sees was pure waste.
+IMAGE_PUSH_COUNT = 1
 GIT_REMOTE = "origin"
 IMAGE_BRANCH = os.environ.get("SENSECRAFT_IMAGE_BRANCH", "sensecraft-images")
 
