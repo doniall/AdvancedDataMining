@@ -40,10 +40,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageChops
 import A_met_radar_probe as radar_probe
 
 # ===================== EDIT THESE =====================
-LOCATION_LAT = 52.6175      # your home latitude   (Kildimo, Co. Limerick)
-LOCATION_LON = -8.8094      # your home longitude
+LOCATION_LAT = 53.32641     # your home latitude   (Drimnagh, Dublin 12)
+LOCATION_LON = -6.31884     # your home longitude
 VIEW         = "portrait"   # "portrait"  = Ireland fills the frame (Atlantic margin)
                             # "landscape" = full Met Eireann extent, out to Wales
+
+ZOOM_HALF_WIDTH_KM = 100    # the zoomed frame's +/- east-west extent around the pin
 
 SHOW_SOLIS_STRIP = True     # reserve a vertical strip for SolisCloud stats,
                             # carved out of the map's own width rather than
@@ -66,6 +68,11 @@ _n = 2 ** TILE_ZOOM
 S  = _n * TILE_SIZE / (2 * math.pi)
 BX = _n * TILE_SIZE / 2 - TILE_X0 * TILE_SIZE
 BY = _n * TILE_SIZE / 2 - TILE_Y0 * TILE_SIZE
+
+# WGS84 semi-major axis -- matches the spherical Web Mercator projection the
+# gdal.met.ie tiles already use above, so it converts the zoomed frame's
+# real-world km window into the same radian/mercY units at the right scale
+EARTH_RADIUS_M = 6378137.0
 
 # manually measured against a saved frame: strip this many source pixels off
 # the west and south edges before the view window is allowed to reach them
@@ -120,6 +127,7 @@ RANGE_GREY = 250
 
 RadarImageSubfolder = "0_RadarPNG"
 GreyscaleRadarImageSubfolder = "1_GreyscalePNG"
+ZoomedRadarImageSubfolder = "2_ZoomedPNG"
 
 # ships are drawn near-black with a light halo so they read clearly whether
 # they sit over pale background or dark (heavy-rain) pixels -- the same
@@ -566,10 +574,28 @@ def canvas_size():
     return (1872, 1404) if VIEW == "landscape" else (1404, 1872)
 
 
-def build_window():
+def build_window(zoom=False):
     """Return the MAP's pixel size (device canvas minus the Solis strip, if
-    enabled) and the mercator view window for the chosen VIEW."""
-    if VIEW == "landscape":
+    enabled) and the mercator view window for the chosen VIEW. zoom=True
+    keeps that same pixel size but overrides the geographic window with a
+    box centered on LOCATION_LAT/LON, +/- ZOOM_HALF_WIDTH_KM east-west --
+    same frame dimensions and resolution, just far less ground per pixel, so
+    vector detail (ship trails, coastline) that's normally too close together
+    to tell apart becomes distinguishable."""
+    if zoom:
+        W, H = canvas_size()
+        if SHOW_SOLIS_STRIP:
+            W -= SOLIS_STRIP_WIDTH
+        cx = math.radians(LOCATION_LON)
+        cy = float(mercY(LOCATION_LAT))
+        # Mercator is conformal -- the same ground-distance-per-radian factor
+        # applies to x (longitude) and y (mercY) at a given point, so one
+        # factor covers both directions here
+        m_per_radian = EARTH_RADIUS_M * math.cos(math.radians(LOCATION_LAT))
+        hw = (ZOOM_HALF_WIDTH_KM * 1000) / m_per_radian
+        hh = hw / (W / H)             # matches this frame's own aspect ratio
+        Wwin, Hwin = 2 * hw, 2 * hh
+    elif VIEW == "landscape":
         W, H = canvas_size()
         if SHOW_SOLIS_STRIP:
             W -= SOLIS_STRIP_WIDTH
@@ -735,7 +761,7 @@ def _draw_solis_strip(d, x0, x1, H, solis):
     wline("Sun", sun_str, y)
 
 
-def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None):
+def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=None, zoom=False):
     A = np.asarray(src).astype(float).copy()
     if (src.width, src.height) != (IMG_W, IMG_H):
         print("warning: expected a %dx%d tile mosaic, got %dx%d; "
@@ -753,7 +779,7 @@ def render(src, rings_County, rings_Coast, frame_time=None, ships=None, solis=No
 
     A = fill_black(A)
 
-    W, H, cx, cy, hw, hh, Wwin, Hwin = build_window()
+    W, H, cx, cy, hw, hh, Wwin, Hwin = build_window(zoom=zoom)
 
     def ll2r(lon, lat):
         return ((math.radians(lon) - (cx - hw)) / Wwin * W,
@@ -1008,6 +1034,10 @@ def main():
         solis = solis_at(solis_history, at_time)
         img = render(src, load_counties(), load_coastline(), frame_time, ships, solis)
         img.save(f"{GreyscaleRadarImageSubfolder}/{imgpath}")
+
+        os.makedirs(ZoomedRadarImageSubfolder, exist_ok=True)
+        zoomed_img = render(src, load_counties(), load_coastline(), frame_time, ships, solis, zoom=True)
+        zoomed_img.save(f"{ZoomedRadarImageSubfolder}/{imgpath}")
         #print(f "wrote {GreyscaleRadarImageSubfolder}/{imgpath}", img.size, "view=" + VIEW)
 
 
