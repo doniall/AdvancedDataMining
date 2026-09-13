@@ -5,15 +5,6 @@ import F_ensure_vm_running
 import G_solis_fetch
 import H_sensecraft_push
 
-#A_met_radar_probe
-
-print("Gathering Met Éireann's rainfall radar snapshots")
-try:
-    A_met_radar_probe.main()
-except Exception as e:
-    print(f"Met Éireann radar fetch failed ({e})")
-
-
 print("Checking the AIS VM is running")
 try:
     F_ensure_vm_running.main()
@@ -31,6 +22,15 @@ try:
     G_solis_fetch.main()
 except Exception as e:
     print(f"SolisCloud fetch failed ({e}); rendering with whatever's already on disk")
+
+# runs right before Greyscale, not at the very start -- keeps the radar
+# frames as fresh as possible relative to when they're actually rendered,
+# rather than possibly sitting around while the AIS/Solis fetches above run
+print("Gathering Met Éireann's rainfall radar snapshots")
+try:
+    A_met_radar_probe.main()
+except Exception as e:
+    print(f"Met Éireann radar fetch failed ({e})")
 
 print("Starting Greyscale")
 B_ireland_radar_greyscale.VIEW = "landscape"
