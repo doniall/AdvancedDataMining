@@ -1053,7 +1053,16 @@ def main():
             if stamp else None
         )
         at_time = frame_time.astimezone(dt.timezone.utc) if frame_time else dt.datetime.now(dt.timezone.utc)
-        ships = ships_at(ship_history, at_time)
+        # png_files is chronological, so the last one is this run's newest
+        # frame -- the one that actually reaches the device. Older frames
+        # (backlog being caught up on) still show ships as of their own
+        # radar timestamp, consistent with the rain they're drawn over;
+        # but for the frame someone's actually going to look at, showing
+        # ships as they were several frames ago (whenever the radar
+        # backlog happened to be) is less useful than just showing where
+        # they are right now.
+        ships_at_time = dt.datetime.now(dt.timezone.utc) if imgpath == png_files[-1] else at_time
+        ships = ships_at(ship_history, ships_at_time)
         solis = solis_at(solis_history, at_time)
         img = render(src, load_counties(), load_coastline(), frame_time, ships, solis,
                      rings_CoastDraw=load_precise_coastline())
